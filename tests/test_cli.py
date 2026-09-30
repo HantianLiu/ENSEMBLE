@@ -533,17 +533,20 @@ def test_resume_v06_meeting_delegates_to_version_pinned_runtime(monkeypatch, tmp
     assert calls == [["/bin/ensemble-v06", "run-report", "--meeting", str(root)]]
 
 
-def test_successor_from_v06_uses_v07_config_not_old_governance(monkeypatch, tmp_path):
+def test_successor_from_v06_uses_explicit_v07_config_not_old_governance(monkeypatch, tmp_path):
     root = tmp_path / "M-LEGACY"
     private = root / "identity_private/meeting_manifest.json"
     private.parent.mkdir(parents=True)
     private.write_text(json.dumps({"software_version": "0.6.0"}), encoding="utf-8")
     monkeypatch.delenv("ENSEMBLE_CONFIG", raising=False)
+    current_config = write_config(tmp_path)
+    old_config = tmp_path / "v06.toml"
     selected = cli._successor_config_path(
-        SimpleNamespace(config=None), SimpleNamespace(root=root),
-        SimpleNamespace(source_path=tmp_path / "v06.toml"),
+        SimpleNamespace(config=str(current_config)), SimpleNamespace(root=root),
+        SimpleNamespace(source_path=old_config),
     )
-    assert selected.endswith("Project_ENSEMBLE_v0.7.1/ensemble.toml")
+    assert selected == str(current_config)
+    assert selected != str(old_config)
 
 
 def test_legacy_resume_script_using_unversioned_ensemble_still_delegates(monkeypatch, tmp_path):
