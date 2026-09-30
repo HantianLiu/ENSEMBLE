@@ -420,5 +420,5 @@
       title/TOC/table/math preflight and a recoverable presentation-only fallback.
       The current ReportLab path remains usable but does not cover all LaTeX math.
 - [x] Add JSON Schema export verification in CI.
-- [x] Add GitHub Actions for Python 3.11/3.12 tests and schema drift checks.
+- [x] Add GitHub Actions for Python 3.12 tests and schema drift checks.
 - [ ] Choose an open-source license.

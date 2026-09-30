@@ -23,7 +23,7 @@ Research Desk 和至少两个不同基础模型的智库长审阅者。主笔先
 
 ## 环境依赖 / Requirements
 
-- Python **3.11+** 和 `pip`。Python 包依赖由 `pyproject.toml` 自动安装：`httpx`、`pydantic`、`reportlab`、`pypdf`、`matplotlib`。运行主流程不需要 Node.js、Pandoc 或 LaTeX；PDF 中的常用 Markdown 数学公式由 Matplotlib 渲染。若要自行编译导出的 `.tex`，则另装支持 `ctexart`、`amsmath`、`amssymb` 的 TeX 引擎。
+- Python **3.12+** 和 `pip`。Python 包依赖由 `pyproject.toml` 自动安装：`httpx`、`pydantic`、`reportlab`、`pypdf`、`matplotlib`。运行主流程不需要 Node.js、Pandoc 或 LaTeX；PDF 中的常用 Markdown 数学公式由 Matplotlib 渲染。若要自行编译导出的 `.tex`，则另装支持 `ctexart`、`amsmath`、`amssymb` 的 TeX 引擎。
 - PDF 默认使用随程序打包的 HarmonyOS Sans SC：Regular 用于正文，Medium 用于节标题，Bold 用于章节标题和目录。原版字体来自[华为官方设计资源](https://developer.huawei.com/consumer/cn/design/resource-V1/)；字体受华为自己的协议约束，不受本项目许可证覆盖。完整许可与版权声明随字体放在 `project_ensemble/assets/fonts/LICENSE.txt`，另见根目录 `THIRD_PARTY_NOTICES.md`。如需覆盖，使用 `ENSEMBLE_CJK_FONT` 指定正文 TTF/TTC，使用 `ENSEMBLE_CJK_HEADING_FONT` 指定标题 TTF。
 - 能访问所选模型供应商的网络连接。启用 Research Desk 时，还需要访问 OpenAlex；Tavily 仅在显式启用时使用。
 - 可选：Codex CLI（ChatGPT 订阅登录方式）、Claude Code CLI（登录或 API 密钥方式）、Slurm `sbatch`（只在启用调度器邮件时需要）。缺少这些可选工具不影响其他供应商。
@@ -43,7 +43,7 @@ ensemble
 Windows 用户在 WSL2 的 Linux shell 中运行上述命令。以下 PowerShell 命令仅展示创建 Python 虚拟环境的形式，**目前不能保证原生 Windows 完整会议流程可运行**：
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
 ensemble
@@ -86,4 +86,4 @@ ensemble
 
 On first launch, select Chinese or English for the interface. Change this later in **Settings → Interface language**. This does not change meeting prompts or report language, which are separate setup choices. The new-meeting guide explains workflow types and model roles. An optional Technician may send the minimum task and evidence excerpts needed for technical recovery to its chosen model provider; the risk is disclosed during setup.
 
-Install with Python 3.11+ using `pip install -e .`, then run `ensemble` from the directory where new meeting workspaces should be created. Choose **Settings** to configure appearance, model providers, OpenAlex/Tavily search backends, and evidence-cache freshness. Credentials may come from an environment variable, an existing external assignment file, or an interactive hidden entry stored outside the repository. User configuration and the cross-workspace meeting index live under your platform's user config directory. `--config` and `ENSEMBLE_CONFIG` remain supported and take precedence. Optional Codex and Claude Code CLI integrations require their respective CLI installation and authentication; ordinary HTTP providers do not. The live footer counts unique cited source records (literature and web pages); it is not a count of full-text pages actually read by a model.
+Install with Python 3.12+ using `pip install -e .`, then run `ensemble` from the directory where new meeting workspaces should be created. Choose **Settings** to configure appearance, model providers, OpenAlex/Tavily search backends, and evidence-cache freshness. Credentials may come from an environment variable, an existing external assignment file, or an interactive hidden entry stored outside the repository. User configuration and the cross-workspace meeting index live under your platform's user config directory. `--config` and `ENSEMBLE_CONFIG` remain supported and take precedence. Optional Codex and Claude Code CLI integrations require their respective CLI installation and authentication; ordinary HTTP providers do not. The live footer counts unique cited source records (literature and web pages); it is not a count of full-text pages actually read by a model.

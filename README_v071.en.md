@@ -56,7 +56,7 @@ PDF part fails.
 
 ## Install and start
 
-Python 3.11 or newer is required. In this directory:
+Python 3.12 or newer is required. In this directory:
 
 ```bash
 python3 -m venv .venv

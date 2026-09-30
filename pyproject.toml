@@ -7,7 +7,7 @@ name = "project-ensemble-v071"
 version = "0.7.1"
 description = "Conservative governance and orchestration primitives for multi-model epistemic deliberation"
 readme = "README_v071.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "httpx>=0.27,<1",
   "pydantic>=2.7,<3",
