@@ -659,7 +659,7 @@ def test_simple_literature_preparatory_chair_dialogue_preserves_formal_roles(mon
     )
     answers = iter([
         "1", "1", "2", "1", "1,2", "1", "1", "1", "1,2", "1", "1", "", "",
-        "2", "2", "1", "希望比较各国疫苗质量控制策略。", "1", "",
+        "2", "2", "1", "希望比较各国疫苗质量控制策略。\n还要核对原始法规文本。", "1", "",
         "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
     ])
     output = io.StringIO()
@@ -673,7 +673,9 @@ def test_simple_literature_preparatory_chair_dialogue_preserves_formal_roles(mon
     assert selection.prompt_development["chair_model"] == "fake:reviewer"
     assert len(requests) == 3
     assert all(request.model_id == "reviewer" for request in requests)
+    assert "希望比较各国疫苗质量控制策略。\n还要核对原始法规文本。" in requests[0].user_text
     assert "筹备主席只协助拟定开题委托" in output.getvalue()
+    assert "\n  ── 你 · 已发送 ──\n希望比较各国疫苗质量控制策略。\n还要核对原始法规文本。\n\n" in output.getvalue()
     assert "\n  ── 主席 ──\n任务范围已明确，可以起草完整委托。\n\n" in output.getvalue()
 
 
@@ -687,6 +689,17 @@ def test_preparatory_dialogue_replies_have_separate_visual_turns():
         "\n  ── 主席 ──\n第一轮回复。\n\n"
         "\n  ── 主席 ──\n第二轮回复。\n\n"
     )
+
+
+def test_dialogue_human_input_is_fully_echoed_and_visually_distinct_from_chair():
+    output = io.StringIO()
+    wizard = TerminalWizard(input_fn=lambda _prompt: "", output=output, color=True)
+    wizard.language = "zh"
+    wizard._dialogue_human_turn("第一行。\n第二行。")
+    wizard._dialogue_reply("主席", "Chair", "我看到了两行。")
+    rendered = output.getvalue()
+    assert "\x1b[32m  ── 你 · 已发送 ──\x1b[0m\n第一行。\n第二行。" in rendered
+    assert "\x1b[36m  ── 主席 ──\x1b[0m\n我看到了两行。" in rendered
 
 
 @pytest.mark.parametrize("direct_continuation", [False, True])

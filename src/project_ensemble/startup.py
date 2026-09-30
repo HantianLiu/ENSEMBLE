@@ -637,6 +637,14 @@ class TerminalWizard:
         self._print(text)
         self._print()
 
+    def _dialogue_human_turn(self, text: str) -> None:
+        """Show the complete committed input, even when terminal paste echo is clipped."""
+        role = "You · sent" if self.language == "en" else "你 · 已发送"
+        self._print()
+        self._print(styled(f"  ── {role} ──", GREEN, enabled=self.color))
+        print(text, file=self.output)
+        self._print()
+
     def _section(self, title: str) -> None:
         title = ui_text(title, self.language)
         heading = f"┌─ {title} "
@@ -922,6 +930,7 @@ class TerminalWizard:
 
         turns: list[dict[str, str]] = []
         self._print("  写下研究想法即可，不必一次成稿。输入 /draft 查看候选命题；/back 改为直接输入。")
+        self._print("  发送后会完整回显你的发言，方便核对长段或多行粘贴。")
         self._print()
         while True:
             message = unicodedata.normalize("NFC", self.input("你: ")).strip()
@@ -940,6 +949,7 @@ class TerminalWizard:
                 )
             else:
                 turns.append({"role": "human", "text": message})
+                self._dialogue_human_turn(message)
                 instruction = (
                     "协助人类把研究想法收敛为可由外部资料核查的一项具体命题。"
                     "简短回应，必要时只问一个最关键的澄清问题。"
@@ -1035,6 +1045,7 @@ class TerminalWizard:
             else "  这一步只设计研究任务，不开始文献检索或撰写报告。"
         )
         self._print("  每次可只说一部分想法；/draft 可随时生成当前最佳版本，/back 改为直接输入。")
+        self._print("  发送后会完整回显你的发言，方便核对长段或多行粘贴。")
         provider_id, model_id = chair_model
         try:
             provider = config.providers[provider_id]
@@ -1093,6 +1104,7 @@ class TerminalWizard:
                 continue
             if not drafting:
                 turns.append({"role": "human", "text": message})
+                self._dialogue_human_turn(message)
             try:
                 if not drafting:
                     response = adapter.generate(GenerationRequest(

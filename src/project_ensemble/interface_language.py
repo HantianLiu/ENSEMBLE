@@ -135,6 +135,7 @@ ENGLISH: dict[str, str] = {
     "  这一步只设计议事委托，不开始提案、审议或表决。": "  This step designs the brief only; it does not start proposals, review, or voting.",
     "  这一步只设计研究任务，不开始文献检索或撰写报告。": "  This step designs the task only; it does not start literature search or report writing.",
     "  每次可只说一部分想法；/draft 可随时生成当前最佳版本，/back 改为直接输入。": "  Share ideas gradually; /draft shows the best current brief, and /back switches to direct entry.",
+    "  发送后会完整回显你的发言，方便核对长段或多行粘贴。": "  Your complete message is echoed after sending, so you can check long or multi-line input.",
     "可选：提供人类参考资料": "Optional: add human-provided reference files",
     "文献报告的读者写作设置": "Reader-facing writing settings for the literature review",
     "不启用 Tavily；仅用 OpenAlex": "Do not use Tavily; OpenAlex only",
