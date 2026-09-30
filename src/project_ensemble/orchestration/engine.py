@@ -1107,6 +1107,10 @@ class MeetingEngine:
         delay_seconds: float,
         exc: Exception,
     ) -> None:
+        # A timed-out provider call is a durable boundary. If the Human
+        # requested Ctrl+R while it was in flight, open that menu before
+        # scheduling another potentially long retry of the old model.
+        self._raise_if_control_requested()
         error_type = type(exc).__name__
         self.progress.retrying(
             participant_id,

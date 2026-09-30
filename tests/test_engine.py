@@ -7,9 +7,11 @@ from project_ensemble.domain import DecisionRigor, GenerationResponse, Reasoning
 from project_ensemble.errors import (
     EmptyModelOutputError,
     InputContextLimitError,
+    ModelReplacementRequested,
     OutputLimitReachedError,
     PermanentProviderError,
     PolicyNotConfiguredError,
+    TransientProviderError,
 )
 from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.providers.fake import ScriptedProviderAdapter
@@ -661,6 +663,43 @@ def test_engine_retries_empty_reachable_output_and_preserves_attempts(tmp_path):
     assert "PROVIDER_RETRY_SCHEDULED" in events
     assert "EmptyModelOutputError" in events
     assert not notifier.calls
+    assert repo.events.verify()
+
+
+def test_ctrl_r_pending_at_provider_timeout_prevents_old_model_retry(tmp_path):
+    repo, representative_id = make_repo(tmp_path)
+
+    class TimedOutAdapter(ScriptedProviderAdapter):
+        calls = 0
+
+        def generate(self, request):
+            self.calls += 1
+            raise TransientProviderError("provider did not respond before timeout")
+
+    adapter = TimedOutAdapter("fake", ["m"])
+    engine = MeetingEngine(
+        repo=repo,
+        adapters={"fake": adapter},
+        notifier=CapturingNotifier(),
+        max_retries=3,
+        retry_base_delay_seconds=0,
+    )
+
+    def requested():
+        if adapter.calls:
+            raise ModelReplacementRequested("Human requested a model change")
+
+    engine.progress.raise_if_control_requested = requested
+    with pytest.raises(ModelReplacementRequested):
+        engine.invoke_participant(
+            representative_id,
+            system_text="s",
+            user_text="u",
+            stage="proposal",
+            sleep=lambda _seconds: None,
+        )
+    assert adapter.calls == 1
+    assert "PROVIDER_RETRY_SCHEDULED" not in repo.events.path.read_text()
     assert repo.events.verify()
 
 
