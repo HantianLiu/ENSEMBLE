@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "option_set_id": {
+      "minLength": 1,
+      "title": "Option Set Id",
+      "type": "string"
+    },
+    "preferred_proposal_id": {
+      "minLength": 1,
+      "title": "Preferred Proposal Id",
+      "type": "string"
+    },
+    "explanation": {
+      "minLength": 1,
+      "title": "Explanation",
+      "type": "string"
+    }
+  },
+  "required": [
+    "option_set_id",
+    "preferred_proposal_id",
+    "explanation"
+  ],
+  "title": "ClauseChoiceExplanation",
+  "type": "object"
+}

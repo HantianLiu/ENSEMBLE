@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_path="$(readlink -f "$0")"
+project_root="$(cd "$(dirname "$launcher_path")/.." && pwd)"
+
+# v0.7.1 is the canonical `ensemble` runtime. Existing v0.7.0 meetings and
+# commands remain available through the sibling `ensemble-old` launcher.
+if [[ -z "${ENSEMBLE_CONFIG:-}" && -f "$project_root/ensemble.toml" ]]; then
+  export ENSEMBLE_CONFIG="$project_root/ensemble.toml"
+fi
+
+if [[ -t 0 ]]; then
+  stty iutf8 2>/dev/null || true
+fi
+
+if [[ -x "$project_root/.venv/bin/ensemble" ]]; then
+  exec "$project_root/.venv/bin/ensemble" "$@"
+fi
+
+runtime_python="${ENSEMBLE_PYTHON:-}"
+if [[ -z "$runtime_python" && -x "$project_root/.venv/bin/python" ]]; then
+  runtime_python="$project_root/.venv/bin/python"
+fi
+if [[ -z "$runtime_python" && -n "${VIRTUAL_ENV:-}" ]]; then
+  runtime_python="$VIRTUAL_ENV/bin/python"
+fi
+if [[ -z "$runtime_python" && -x "$project_root/../Project_ENSEMBLE_v0.6-dev/.venv/bin/python" ]]; then
+  runtime_python="$project_root/../Project_ENSEMBLE_v0.6-dev/.venv/bin/python"
+fi
+if [[ -z "$runtime_python" ]]; then
+  runtime_python="$(command -v python3 || true)"
+fi
+if [[ ! -x "$runtime_python" ]]; then
+  echo "ensemble: no usable Python environment; install v0.7.1 or set ENSEMBLE_PYTHON" >&2
+  exit 127
+fi
+export PYTHONPATH="$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$runtime_python" -m project_ensemble.cli "$@"

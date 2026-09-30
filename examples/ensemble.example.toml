@@ -1,0 +1,65 @@
+[project]
+# @package resolves to the immutable governance files shipped with v0.7.0 and
+# works from any current directory after installation.
+governance_docs = "@package"
+
+# Provider/model definitions live in a separate, portable file. Keep the
+# concrete model_config.toml out of version control when it contains local
+# credential-file paths.
+model_config_file = "./model_config.toml"
+
+[governance]
+provider_retries = 3
+provider_retry_base_delay_seconds = 30.0
+provider_output_context_fraction = 0.50
+provider_input_context_fraction = 0.80
+provider_input_token_limit_fallback = 262144
+# No client-side per-call output limit is set by default. Uncomment this to opt
+# into model-specific budgets; this value is the fallback when catalog context
+# metadata is unavailable.
+# provider_output_token_limit = 65536
+consultative_fraction = 0.30
+audit_max_turns_per_model = 5
+fail_closed = true
+
+# Shared, non-voting Research Desk retrieval defaults. These settings take
+# effect only for meetings whose startup selection enables Research Desk.
+[research]
+retriever = "openalex"
+openalex_base_url = "https://api.openalex.org"
+# openalex_contact_email = "research@example.org"
+openalex_api_key_env = "OPENALEX_API_KEY"
+# openalex_api_key_file = "~/.config/secrets/openalex.sh"
+request_timeout_seconds = 30.0
+# Startup suggests 12 and lets the Human choose 1–50; this is the
+# non-interactive default and legacy-meeting fallback.
+max_results_per_query = 12
+volatile_freshness_days = 7
+versioned_freshness_days = 30
+stable_freshness_days = 180
+max_source_document_bytes = 50000000
+
+# Optional general-Web supplement. OpenAlex remains the primary scholarly
+# backend. Prefer an environment variable; api_key_file is available for a
+# local shell assignment file containing only the named key.
+[research.tavily]
+enabled = false
+base_url = "https://api.tavily.com"
+api_key_env = "TAVILY_API_KEY"
+# api_key_file = "~/.config/secrets/tavily.sh"
+search_depth = "advanced"
+max_results_per_query = 8
+chunks_per_source = 3
+
+# Optional human-escalation email. When enabled, ENSEMBLE submits a minimal
+# Slurm job and lets the scheduler send its completion notification.
+[notifications.email]
+enabled = false
+transport = "slurm"
+slurm_sbatch_command = "sbatch"
+slurm_time_limit = "00:01:00"
+# slurm_partition = "short"
+# slurm_account = "your-account"
+# slurm_qos = "normal"
+timeout_seconds = 30.0
+subject_prefix = "[Project ENSEMBLE]"

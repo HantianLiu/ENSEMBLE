@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "NewOptionReviewItem": {
+      "additionalProperties": false,
+      "properties": {
+        "proposal_id": {
+          "title": "Proposal Id",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "QUALIFY",
+            "EXCLUDE",
+            "REWRITE_REQUIRED"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "normalized_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normalized Text"
+        },
+        "meaning_changed": {
+          "default": false,
+          "title": "Meaning Changed",
+          "type": "boolean"
+        },
+        "reason_code": {
+          "enum": [
+            "QUALIFIED",
+            "SUBSTANTIVE_DUPLICATE",
+            "OUT_OF_SCOPE",
+            "NOT_EXECUTABLE_TEXT",
+            "MULTIPLE_INSEPARABLE_OPTIONS",
+            "NORMALIZATION_CHANGED_MEANING"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "decision",
+        "reason_code",
+        "reason"
+      ],
+      "title": "NewOptionReviewItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "reviews": {
+      "items": {
+        "$ref": "#/$defs/NewOptionReviewItem"
+      },
+      "title": "Reviews",
+      "type": "array"
+    }
+  },
+  "required": [
+    "reviews"
+  ],
+  "title": "NewOptionReviewPlan",
+  "type": "object"
+}

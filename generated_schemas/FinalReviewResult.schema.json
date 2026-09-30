@@ -1,0 +1,248 @@
+{
+  "$defs": {
+    "MeetingPhase": {
+      "enum": [
+        "INIT",
+        "INITIAL_DRAFT",
+        "RESEARCH_ROUND",
+        "RESEARCH_PLANNING",
+        "RESEARCH_OUTLINE_REVIEW",
+        "LITERATURE_MODULE_RESEARCH",
+        "LITERATURE_MODULE_DRAFTING",
+        "LITERATURE_MODULE_REVIEW",
+        "LITERATURE_MODULE_CONFIRMATION",
+        "LITERATURE_REPORT_SYNTHESIS",
+        "LITERATURE_REPORT_REVIEW",
+        "LITERATURE_REPORT_PUBLICATION",
+        "SCHOLARLY_RENDERING_PLAN",
+        "SCHOLARLY_RENDERING_DRAFT",
+        "SCHOLARLY_SCIENCE_REVIEW",
+        "SCHOLARLY_CITATION_REVIEW",
+        "SCHOLARLY_RENDERING_PUBLICATION",
+        "GENERAL_POSITION",
+        "AMENDMENT_SUBMISSION",
+        "COSPONSORSHIP",
+        "BALLOT",
+        "GENERAL_RATIFICATION",
+        "STATUS_TRANSITION",
+        "DETAILED_DRAFTING",
+        "CLAUSE_REVIEW",
+        "RESOLUTION_FROZEN",
+        "CHAIR_REVIEW",
+        "THINK_TANK_REVIEW",
+        "HUMAN_REVIEW",
+        "HANDOFF_READY",
+        "PAUSED",
+        "CLOSED"
+      ],
+      "title": "MeetingPhase",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "chair_certification_status": {
+      "title": "Chair Certification Status",
+      "type": "string"
+    },
+    "certified_resolution_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Certified Resolution Path"
+    },
+    "librarian_review_count": {
+      "default": 0,
+      "title": "Librarian Review Count",
+      "type": "integer"
+    },
+    "material_finding_count": {
+      "default": 0,
+      "title": "Material Finding Count",
+      "type": "integer"
+    },
+    "reconvene_recommendation_count": {
+      "default": 0,
+      "title": "Reconvene Recommendation Count",
+      "type": "integer"
+    },
+    "chair_handoff_brief_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chair Handoff Brief Path"
+    },
+    "think_tank_execution_review_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Think Tank Execution Review Path"
+    },
+    "think_tank_execution_review_count": {
+      "default": 0,
+      "title": "Think Tank Execution Review Count",
+      "type": "integer"
+    },
+    "human_review_packet_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Human Review Packet Path"
+    },
+    "chair_readability_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chair Readability Status"
+    },
+    "chair_readability_certification_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chair Readability Certification Path"
+    },
+    "final_report_markdown_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Final Report Markdown Path"
+    },
+    "final_report_pdf_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Final Report Pdf Path"
+    },
+    "final_publication_manifest_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Final Publication Manifest Path"
+    },
+    "minority_report_count": {
+      "default": 0,
+      "title": "Minority Report Count",
+      "type": "integer"
+    },
+    "audit_requester_count": {
+      "default": 0,
+      "title": "Audit Requester Count",
+      "type": "integer"
+    },
+    "audit_petition_count": {
+      "default": 0,
+      "title": "Audit Petition Count",
+      "type": "integer"
+    },
+    "audit_petition_bundle_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Audit Petition Bundle Path"
+    },
+    "chair_accountability_report_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chair Accountability Report Path"
+    },
+    "chair_accountability_cli_brief_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chair Accountability Cli Brief Path"
+    },
+    "next_phase": {
+      "$ref": "#/$defs/MeetingPhase"
+    },
+    "paused_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Paused Reason"
+    }
+  },
+  "required": [
+    "chair_certification_status",
+    "next_phase"
+  ],
+  "title": "FinalReviewResult",
+  "type": "object"
+}

@@ -1,0 +1,14 @@
+meeting_id: M-XXXX
+frozen: true
+
+representatives:
+  R-001:
+    model: HIDDEN_DURING_DELIBERATION
+    provider: HIDDEN_DURING_DELIBERATION
+    harness: HIDDEN_DURING_DELIBERATION
+    persona: HIDDEN_DURING_DELIBERATION
+    prompt_version: HIDDEN_DURING_DELIBERATION
+    reasoning_setting: HIDDEN_DURING_DELIBERATION
+
+# 实际 registry 应由 orchestrator 保存真实值。
+# 只有在 audit petitions freeze 后向审计层解锁。

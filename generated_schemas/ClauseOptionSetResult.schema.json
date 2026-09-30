@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "MeetingPhase": {
+      "enum": [
+        "INIT",
+        "INITIAL_DRAFT",
+        "RESEARCH_ROUND",
+        "RESEARCH_PLANNING",
+        "RESEARCH_OUTLINE_REVIEW",
+        "LITERATURE_MODULE_RESEARCH",
+        "LITERATURE_MODULE_DRAFTING",
+        "LITERATURE_MODULE_REVIEW",
+        "LITERATURE_MODULE_CONFIRMATION",
+        "LITERATURE_REPORT_SYNTHESIS",
+        "LITERATURE_REPORT_REVIEW",
+        "LITERATURE_REPORT_PUBLICATION",
+        "SCHOLARLY_RENDERING_PLAN",
+        "SCHOLARLY_RENDERING_DRAFT",
+        "SCHOLARLY_SCIENCE_REVIEW",
+        "SCHOLARLY_CITATION_REVIEW",
+        "SCHOLARLY_RENDERING_PUBLICATION",
+        "GENERAL_POSITION",
+        "AMENDMENT_SUBMISSION",
+        "COSPONSORSHIP",
+        "BALLOT",
+        "GENERAL_RATIFICATION",
+        "STATUS_TRANSITION",
+        "DETAILED_DRAFTING",
+        "CLAUSE_REVIEW",
+        "RESOLUTION_FROZEN",
+        "CHAIR_REVIEW",
+        "THINK_TANK_REVIEW",
+        "HUMAN_REVIEW",
+        "HANDOFF_READY",
+        "PAUSED",
+        "CLOSED"
+      ],
+      "title": "MeetingPhase",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "option_set_count": {
+      "title": "Option Set Count",
+      "type": "integer"
+    },
+    "type_i_count": {
+      "title": "Type I Count",
+      "type": "integer"
+    },
+    "type_ii_count": {
+      "title": "Type Ii Count",
+      "type": "integer"
+    },
+    "type_iii_count": {
+      "title": "Type Iii Count",
+      "type": "integer"
+    },
+    "record_path": {
+      "title": "Record Path",
+      "type": "string"
+    },
+    "next_phase": {
+      "$ref": "#/$defs/MeetingPhase"
+    },
+    "paused_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Paused Reason"
+    }
+  },
+  "required": [
+    "option_set_count",
+    "type_i_count",
+    "type_ii_count",
+    "type_iii_count",
+    "record_path",
+    "next_phase"
+  ],
+  "title": "ClauseOptionSetResult",
+  "type": "object"
+}

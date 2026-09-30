@@ -1,0 +1,40 @@
+{
+  "$defs": {
+    "ClauseRunoffVote": {
+      "additionalProperties": false,
+      "properties": {
+        "option_set_id": {
+          "minLength": 1,
+          "title": "Option Set Id",
+          "type": "string"
+        },
+        "choice": {
+          "minLength": 1,
+          "title": "Choice",
+          "type": "string"
+        }
+      },
+      "required": [
+        "option_set_id",
+        "choice"
+      ],
+      "title": "ClauseRunoffVote",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "votes": {
+      "items": {
+        "$ref": "#/$defs/ClauseRunoffVote"
+      },
+      "title": "Votes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "votes"
+  ],
+  "title": "ClauseRunoffAction",
+  "type": "object"
+}

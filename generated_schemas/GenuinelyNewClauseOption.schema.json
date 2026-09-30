@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "text": {
+      "minLength": 1,
+      "title": "Text",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "substantive_gain": {
+      "minLength": 1,
+      "title": "Substantive Gain",
+      "type": "string"
+    }
+  },
+  "required": [
+    "text",
+    "reason",
+    "substantive_gain"
+  ],
+  "title": "GenuinelyNewClauseOption",
+  "type": "object"
+}

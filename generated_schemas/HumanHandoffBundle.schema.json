@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "ChairHandoffBrief": {
+      "properties": {
+        "meeting_id": {
+          "title": "Meeting Id",
+          "type": "string"
+        },
+        "task_goal": {
+          "title": "Task Goal",
+          "type": "string"
+        },
+        "approved_constraints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Approved Constraints",
+          "type": "array"
+        },
+        "provenance_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provenance Refs",
+          "type": "array"
+        },
+        "contested_items": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Contested Items",
+          "type": "array"
+        },
+        "deliverables": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Deliverables",
+          "type": "array"
+        },
+        "freeform": {
+          "additionalProperties": true,
+          "title": "Freeform",
+          "type": "object"
+        }
+      },
+      "required": [
+        "meeting_id",
+        "task_goal"
+      ],
+      "title": "ChairHandoffBrief",
+      "type": "object"
+    },
+    "ThinkTankReview": {
+      "properties": {
+        "meeting_id": {
+          "title": "Meeting Id",
+          "type": "string"
+        },
+        "reviewer_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reviewer Ids",
+          "type": "array"
+        },
+        "findings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Findings",
+          "type": "array"
+        },
+        "cautions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cautions",
+          "type": "array"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "freeform": {
+          "additionalProperties": true,
+          "title": "Freeform",
+          "type": "object"
+        }
+      },
+      "required": [
+        "meeting_id",
+        "reviewer_ids"
+      ],
+      "title": "ThinkTankReview",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chair_brief": {
+      "$ref": "#/$defs/ChairHandoffBrief"
+    },
+    "think_tank_reviews": {
+      "items": {
+        "$ref": "#/$defs/ThinkTankReview"
+      },
+      "title": "Think Tank Reviews",
+      "type": "array"
+    }
+  },
+  "required": [
+    "chair_brief",
+    "think_tank_reviews"
+  ],
+  "title": "HumanHandoffBundle",
+  "type": "object"
+}

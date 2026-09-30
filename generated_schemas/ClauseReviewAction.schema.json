@@ -1,0 +1,150 @@
+{
+  "$defs": {
+    "ClauseProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "target_clause_id": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "title": "Target Clause Id",
+          "type": "string"
+        },
+        "proposal_type": {
+          "enum": [
+            "SUPPLEMENT",
+            "REPLACE",
+            "NEW_OPTION"
+          ],
+          "title": "Proposal Type",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_clause_id",
+        "proposal_type",
+        "text",
+        "reason"
+      ],
+      "title": "ClauseProposal",
+      "type": "object"
+    },
+    "ClauseSplitMotion": {
+      "additionalProperties": false,
+      "properties": {
+        "target_clause_id": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "title": "Target Clause Id",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "proposed_parts": {
+          "items": {
+            "$ref": "#/$defs/SplitPart"
+          },
+          "minItems": 2,
+          "title": "Proposed Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "target_clause_id",
+        "reason",
+        "proposed_parts"
+      ],
+      "title": "ClauseSplitMotion",
+      "type": "object"
+    },
+    "SplitPart": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "text"
+      ],
+      "title": "SplitPart",
+      "type": "object"
+    },
+    "SuspensionMotion": {
+      "additionalProperties": false,
+      "properties": {
+        "target_clause_id": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "title": "Target Clause Id",
+          "type": "string"
+        },
+        "category": {
+          "enum": [
+            "EVIDENCE_INSUFFICIENT",
+            "PROCEDURAL_CONTRADICTION",
+            "UNSAFE_CONSEQUENCE",
+            "UNRESOLVABLE_AMBIGUITY"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_clause_id",
+        "category",
+        "reason"
+      ],
+      "title": "SuspensionMotion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "proposals": {
+      "items": {
+        "$ref": "#/$defs/ClauseProposal"
+      },
+      "title": "Proposals",
+      "type": "array"
+    },
+    "split_motions": {
+      "items": {
+        "$ref": "#/$defs/ClauseSplitMotion"
+      },
+      "title": "Split Motions",
+      "type": "array"
+    },
+    "suspension_motions": {
+      "items": {
+        "$ref": "#/$defs/SuspensionMotion"
+      },
+      "title": "Suspension Motions",
+      "type": "array"
+    }
+  },
+  "title": "ClauseReviewAction",
+  "type": "object"
+}

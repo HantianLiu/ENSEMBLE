@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "SplitPart": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "text"
+      ],
+      "title": "SplitPart",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "target_clause_id": {
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "title": "Target Clause Id",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "proposed_parts": {
+      "items": {
+        "$ref": "#/$defs/SplitPart"
+      },
+      "minItems": 2,
+      "title": "Proposed Parts",
+      "type": "array"
+    }
+  },
+  "required": [
+    "target_clause_id",
+    "reason",
+    "proposed_parts"
+  ],
+  "title": "ClauseSplitMotion",
+  "type": "object"
+}

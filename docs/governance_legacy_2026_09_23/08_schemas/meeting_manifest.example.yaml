@@ -1,0 +1,12 @@
+meeting_id: M-XXXX
+representative_models: []
+chair_model: "HUMAN_SELECTED"
+chair_provider: ""
+chair_harness: ""
+chair_prompt_version: ""
+representative_reasoning_effort: default
+chair_reasoning_effort: default
+research_enabled: false
+research_model: null
+research_reasoning_effort: null
+roster_frozen: false

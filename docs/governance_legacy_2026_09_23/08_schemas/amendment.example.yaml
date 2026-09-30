@@ -1,0 +1,20 @@
+amendment_id: A-XXXX
+proposer_rep_id: R-XXX
+co_sponsors: []
+
+declared_type: OBJECTION_OR_SUPPLEMENTARY
+claimed_target_items: []
+claimed_impact_scope: []
+claimed_dependencies: []
+claimed_incompatibilities: []
+
+chair_procedural_status:
+  final_type: ""
+  normalized_targets: []
+  normalized_impact_scope: []
+  conflict_edges: []
+  dependency_edges: []
+  ruling_ref: ""
+
+current_status: PENDING
+# possible examples: PENDING / ADOPTED / REJECTED / REBASE_REQUIRED / SUPERSEDED

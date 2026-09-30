@@ -1,0 +1,48 @@
+{
+  "$defs": {
+    "CitationDisposition": {
+      "additionalProperties": false,
+      "properties": {
+        "amendment_id": {
+          "pattern": "^CA-[0-9]{3}$",
+          "title": "Amendment Id",
+          "type": "string"
+        },
+        "apply": {
+          "title": "Apply",
+          "type": "boolean"
+        },
+        "rationale": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amendment_id",
+        "apply",
+        "rationale"
+      ],
+      "title": "CitationDisposition",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "decisions": {
+      "items": {
+        "$ref": "#/$defs/CitationDisposition"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Decisions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "decisions"
+  ],
+  "title": "ChairCitationApplication",
+  "type": "object"
+}

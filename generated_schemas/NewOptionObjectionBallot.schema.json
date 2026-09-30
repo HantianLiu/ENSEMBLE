@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "NewOptionObjectionVote": {
+      "additionalProperties": false,
+      "properties": {
+        "proposal_id": {
+          "title": "Proposal Id",
+          "type": "string"
+        },
+        "choice": {
+          "enum": [
+            "RESTORE",
+            "UPHOLD_EXCLUSION"
+          ],
+          "title": "Choice",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "choice"
+      ],
+      "title": "NewOptionObjectionVote",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "votes": {
+      "items": {
+        "$ref": "#/$defs/NewOptionObjectionVote"
+      },
+      "title": "Votes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "votes"
+  ],
+  "title": "NewOptionObjectionBallot",
+  "type": "object"
+}

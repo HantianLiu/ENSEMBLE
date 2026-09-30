@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "maxLength": 300,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "body_markdown": {
+      "minLength": 1,
+      "title": "Body Markdown",
+      "type": "string"
+    },
+    "justification": {
+      "maxLength": 2500,
+      "minLength": 1,
+      "title": "Justification",
+      "type": "string"
+    },
+    "removed_irrelevant_material": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Removed Irrelevant Material",
+      "type": "array"
+    },
+    "conclusion_changes": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1,
+      "title": "Conclusion Changes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "title",
+    "body_markdown",
+    "justification"
+  ],
+  "title": "RenderedSection",
+  "type": "object"
+}

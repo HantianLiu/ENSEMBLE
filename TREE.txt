@@ -1,0 +1,42 @@
+Project_ENSEMBLE v0.7.0
+├── README.md                         # 安装、配置、运行与架构概览
+├── api.md                            # 命令行与 Python 接口说明
+├── CONTRIBUTING.md                   # 开发与测试约定
+├── SECURITY.md                       # 漏洞报告与密钥安全
+├── VERSION.md
+├── TEST_REPORT.md
+├── TODO.md                           # 已采纳但尚未实现的制度/工程工作
+├── NEXT_VERSION_NOTES.md             # 下一版本设计备忘
+├── PROJECT_OVERVIEW_CN.txt           # 面向普通读者的中文介绍
+├── pyproject.toml                    # project-ensemble-v07 / ensemble-v07
+├── MANIFEST.in
+├── examples
+│   ├── ensemble.example.toml         # 可公开的主配置模板
+│   └── model_config.example.toml     # 模型端点与 API 凭据模板
+├── scripts
+│   ├── ensemble-v07                  # 源码检出目录启动器
+│   ├── export_json_schemas.py
+│   └── smoke_test.sh
+├── docs
+│   ├── architecture                  # 安全、供应商与设计说明
+│   └── governance                    # v0.7.0 制度文本、运行协议与示例
+├── generated_schemas                 # 82 个由 Pydantic 模型生成的 JSON Schema
+├── src/project_ensemble
+│   ├── cli.py                        # ensemble-v07 命令入口
+│   ├── config.py                     # 主配置、模型配置与凭据解析
+│   ├── domain.py                     # 核心数据模型
+│   ├── startup.py                    # 交互初始化与会议固化
+│   ├── paths.py                      # 源码/安装包制度文件定位
+│   ├── audit                         # 审计数据结构；完整状态机为显式空接口
+│   ├── governance_private            # 阈值与起草内部规则
+│   ├── notifications                 # 可选 Slurm 邮件通知
+│   ├── orchestration                 # 总则、细则、报告、渲染和恢复流程
+│   ├── providers                     # Gemini/OpenAI-compatible 等适配器
+│   ├── research                      # Research Desk、检索、缓存与引文
+│   ├── runtime                       # 上下文、访问控制、进度与遥测
+│   └── storage                       # 会议仓库、事件链、人类输出与 v0.6 迁移
+└── tests                             # 306 项回归测试
+
+说明：Python 导入命名空间仍为 project_ensemble；发行包名与命令分别为
+project-ensemble-v07 和 ensemble-v07。v0.7.0 应安装在独立虚拟环境中，避免与
+旧版共用同一 Python site-packages。

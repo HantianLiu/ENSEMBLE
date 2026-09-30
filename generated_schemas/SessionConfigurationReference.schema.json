@@ -1,0 +1,76 @@
+{
+  "properties": {
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "config_path": {
+      "title": "Config Path",
+      "type": "string"
+    },
+    "config_sha256": {
+      "title": "Config Sha256",
+      "type": "string"
+    },
+    "snapshot_path": {
+      "title": "Snapshot Path",
+      "type": "string"
+    },
+    "governance_docs_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Governance Docs Path"
+    },
+    "model_config_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Config Path"
+    },
+    "model_config_sha256": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Config Sha256"
+    },
+    "model_config_snapshot_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Config Snapshot Path"
+    }
+  },
+  "required": [
+    "meeting_id",
+    "config_path",
+    "config_sha256",
+    "snapshot_path"
+  ],
+  "title": "SessionConfigurationReference",
+  "type": "object"
+}

@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "CitationAmendment": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "enum": [
+            "INSERT",
+            "REMOVE"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "target_text": {
+          "maxLength": 3000,
+          "minLength": 1,
+          "title": "Target Text",
+          "type": "string"
+        },
+        "citation_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Citation Text"
+        },
+        "source_packet_id": {
+          "anyOf": [
+            {
+              "pattern": "^RP-[A-Z0-9]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Packet Id"
+        },
+        "rationale": {
+          "maxLength": 900,
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "amendment_id": {
+          "pattern": "^CA-[0-9]{3}$",
+          "title": "Amendment Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "target_text",
+        "rationale",
+        "amendment_id"
+      ],
+      "title": "CitationAmendment",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "amendments": {
+      "items": {
+        "$ref": "#/$defs/CitationAmendment"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Amendments",
+      "type": "array"
+    }
+  },
+  "required": [
+    "amendments"
+  ],
+  "title": "CitationAnchorRepair",
+  "type": "object"
+}

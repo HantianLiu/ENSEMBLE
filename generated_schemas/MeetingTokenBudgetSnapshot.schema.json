@@ -1,0 +1,96 @@
+{
+  "$defs": {
+    "ModelTokenBudget": {
+      "properties": {
+        "provider_id": {
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "advertised_input_context_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Advertised Input Context Tokens"
+        },
+        "advertised_output_limit_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Advertised Output Limit Tokens"
+        },
+        "target_context_fraction": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Target Context Fraction",
+          "type": "number"
+        },
+        "requested_output_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Requested Output Tokens",
+          "type": "integer"
+        },
+        "basis": {
+          "enum": [
+            "ADVERTISED_CONTEXT_FRACTION",
+            "ADVERTISED_CONTEXT_FRACTION_CAPPED_BY_OUTPUT_LIMIT",
+            "CONFIGURED_FALLBACK_NO_CONTEXT_METADATA"
+          ],
+          "title": "Basis",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "model_id",
+        "target_context_fraction",
+        "requested_output_tokens",
+        "basis"
+      ],
+      "title": "ModelTokenBudget",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "target_context_fraction": {
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "title": "Target Context Fraction",
+      "type": "number"
+    },
+    "configured_fallback_tokens": {
+      "exclusiveMinimum": 0,
+      "title": "Configured Fallback Tokens",
+      "type": "integer"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/$defs/ModelTokenBudget"
+      },
+      "title": "Models",
+      "type": "array"
+    }
+  },
+  "required": [
+    "target_context_fraction",
+    "configured_fallback_tokens",
+    "models"
+  ],
+  "title": "MeetingTokenBudgetSnapshot",
+  "type": "object"
+}

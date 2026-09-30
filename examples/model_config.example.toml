@@ -1,0 +1,83 @@
+# Copy this file to model_config.toml and keep the copy out of version control.
+# Never put a literal API key in this file. Each provider names an environment
+# variable and may optionally point to a local shell-assignment file. ENSEMBLE
+# parses that file as data; it never sources or executes it.
+
+[providers.deepseek]
+kind = "openai_compatible"
+enabled = true
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+# api_key_file = "~/.config/secrets/deepseek.sh"
+timeout_seconds = 1200.0
+reasoning_effort_transport = "openai"
+reasoning_effort_map = { low = "low", medium = "high", high = "high" }
+# selectable_models = ["deepseek-chat"]
+# model_input_token_limits = { "deepseek-chat" = 1048576 }
+# model_max_concurrent_requests = { "deepseek-chat" = 1 }
+
+[providers.kimi]
+kind = "openai_compatible"
+enabled = false
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+# api_key_file = "~/.config/secrets/kimi.sh"
+timeout_seconds = 1200.0
+reasoning_effort_transport = "openai"
+reasoning_effort_map = { low = "low", medium = "high", high = "max" }
+reasoning_effort_model_patterns = ["kimi-k3"]
+
+[providers.glm]
+kind = "openai_compatible"
+enabled = false
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "GLM_API_KEY"
+# api_key_file = "~/.config/secrets/glm.sh"
+timeout_seconds = 1200.0
+# Add only capacities verified for the exact deployed model IDs.
+# model_input_token_limits = { "glm-5.3-flash" = 1048576 }
+
+[providers.gemini]
+kind = "gemini"
+enabled = false
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+# api_key_file = "~/.config/secrets/gemini.sh"
+timeout_seconds = 1200.0
+reasoning_effort_transport = "gemini"
+reasoning_effort_map = { low = "low", medium = "medium", high = "high" }
+reasoning_effort_model_patterns = ["gemini-3*"]
+
+# Optional: use the locally signed-in Codex CLI and the ChatGPT plan's Codex
+# allowance. This is separate from the OpenAI Platform API and never reads an
+# OPENAI_API_KEY. Sign in via `codex login` before starting ENSEMBLE. By default
+# a temporary clean Codex home links only the existing local auth.json file.
+# The provider refuses API-key logins and active MCP servers.
+[providers.codex]
+kind = "codex_subscription"
+enabled = false
+codex_command = "codex"
+# Optional alternative when login state is not in the default auth.json:
+# codex_home = "~/.config/project-ensemble/codex"
+# CODEX_HOME=~/.config/project-ensemble/codex codex login --device-auth
+timeout_seconds = 1200.0
+# Model IDs are discovered from Codex's account-specific model/list endpoint.
+# selectable_models = ["gpt-6-sol"]
+reasoning_effort_transport = "openai"
+reasoning_effort_map = { low = "low", medium = "medium", high = "high" }
+max_concurrent_requests = 1
+
+# Optional Claude Code CLI transport. Install Claude Code and run
+# `claude auth login` first, or supply ANTHROPIC_API_KEY below for API billing.
+# Unlike the Codex adapter, model IDs are explicitly configured because the
+# CLI does not provide a stable account-scoped model catalog endpoint here.
+# All ENSEMBLE calls use fresh temporary directories and disable tools/MCP.
+[providers.claude_code]
+kind = "claude_code"
+enabled = false
+claude_command = "claude"
+selectable_models = ["sonnet"]
+timeout_seconds = 1200.0
+# For API-key billing, uncomment these two lines instead of using CLI login:
+# api_key_env = "ANTHROPIC_API_KEY"
+# api_key_file = "~/.config/secrets/anthropic.sh"

@@ -1,0 +1,26 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "option_set_id": {
+      "title": "Option Set Id",
+      "type": "string"
+    },
+    "preferred_proposal_id": {
+      "title": "Preferred Proposal Id",
+      "type": "string"
+    },
+    "explanation": {
+      "maxLength": 1200,
+      "minLength": 1,
+      "title": "Explanation",
+      "type": "string"
+    }
+  },
+  "required": [
+    "option_set_id",
+    "preferred_proposal_id",
+    "explanation"
+  ],
+  "title": "ReconstructedExplanation",
+  "type": "object"
+}

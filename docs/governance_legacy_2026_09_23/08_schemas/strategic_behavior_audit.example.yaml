@@ -1,0 +1,30 @@
+
+gaming_risk_id: G-001
+audit_case: A-XXXX
+
+observed_pattern:
+  type: ""
+  description: ""
+  evidence_refs: []
+
+affected_rules: []
+
+institutional_advantage:
+  observed: false
+  description: ""
+  evidence_refs: []
+
+substantive_justification:
+  assessment: unknown
+  evidence_refs: []
+
+cross_meeting_pattern:
+  observed: false
+  evidence_refs: []
+
+risk_level: low
+
+recommended_action:
+  - observe
+
+representative_visible: false

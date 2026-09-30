@@ -1,0 +1,109 @@
+{
+  "$defs": {
+    "ThinkTankFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "severity": {
+          "enum": [
+            "NOTE",
+            "CAUTION",
+            "MATERIAL"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "category": {
+          "enum": [
+            "OMISSION",
+            "DEFINITION",
+            "ASSUMPTION",
+            "EVIDENCE",
+            "CONTRADICTION",
+            "VERIFICATION",
+            "LITERATURE_OR_BENCHMARK",
+            "PROVENANCE",
+            "CONCLUSION_STRENGTH",
+            "TRIAL_POLICY"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "finding": {
+          "minLength": 1,
+          "title": "Finding",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "human_attention": {
+          "minLength": 1,
+          "title": "Human Attention",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "category",
+        "finding",
+        "evidence_refs",
+        "human_attention"
+      ],
+      "title": "ThinkTankFinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "epistemic_status": {
+      "enum": [
+        "COMPLETE",
+        "CAUTIONS",
+        "MATERIAL_OMISSION",
+        "NEEDS_CLARIFICATION"
+      ],
+      "title": "Epistemic Status",
+      "type": "string"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/ThinkTankFinding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "reconvene_worthy": {
+      "title": "Reconvene Worthy",
+      "type": "boolean"
+    },
+    "reconvene_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reconvene Reason"
+    }
+  },
+  "required": [
+    "epistemic_status",
+    "summary",
+    "reconvene_worthy"
+  ],
+  "title": "LibrarianEpistemicReview",
+  "type": "object"
+}

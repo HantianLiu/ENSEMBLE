@@ -1,0 +1,24 @@
+meeting_id: M-XXXX
+
+general_principle:
+  status: SUPERMAJORITY_PASS
+  version: D3
+  provenance: []
+
+clauses: []
+
+procedural_review:
+  status: pending
+  chair_rulings: []
+
+epistemic_review:
+  status: pending
+  think_tank_findings: []
+  automatic_reopen: false
+
+handoff:
+  chair_brief: pending
+  think_tank_review: pending
+
+human_action:
+  status: pending

@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "RenderingAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "section_id": {
+          "pattern": "^SR-[0-9]{3}$",
+          "title": "Section Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "source_block_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "title": "Source Block Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "section_id",
+        "title",
+        "source_block_ids"
+      ],
+      "title": "RenderingAssignment",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "assignments": {
+      "items": {
+        "$ref": "#/$defs/RenderingAssignment"
+      },
+      "maxItems": 999,
+      "minItems": 1,
+      "title": "Assignments",
+      "type": "array"
+    },
+    "rationale": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Rationale",
+      "type": "string"
+    }
+  },
+  "required": [
+    "assignments",
+    "rationale"
+  ],
+  "title": "RenderingPlan",
+  "type": "object"
+}

@@ -1,0 +1,81 @@
+{
+  "properties": {
+    "gaming_risk_id": {
+      "title": "Gaming Risk Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "low",
+        "moderate",
+        "high"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "observed_pattern": {
+      "title": "Observed Pattern",
+      "type": "string"
+    },
+    "affected_rules": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Affected Rules",
+      "type": "array"
+    },
+    "institutional_advantage_observed": {
+      "default": false,
+      "title": "Institutional Advantage Observed",
+      "type": "boolean"
+    },
+    "institutional_advantage_description": {
+      "default": "",
+      "title": "Institutional Advantage Description",
+      "type": "string"
+    },
+    "substantive_justification": {
+      "default": "unknown",
+      "enum": [
+        "sufficient",
+        "partial",
+        "weak",
+        "unknown"
+      ],
+      "title": "Substantive Justification",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "cross_meeting_pattern_observed": {
+      "default": false,
+      "title": "Cross Meeting Pattern Observed",
+      "type": "boolean"
+    },
+    "recommended_action": {
+      "items": {
+        "enum": [
+          "observe",
+          "modify",
+          "experiment",
+          "no_action"
+        ],
+        "type": "string"
+      },
+      "title": "Recommended Action",
+      "type": "array"
+    }
+  },
+  "required": [
+    "gaming_risk_id",
+    "status",
+    "observed_pattern"
+  ],
+  "title": "GamingRisk",
+  "type": "object"
+}

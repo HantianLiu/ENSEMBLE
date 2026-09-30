@@ -1,0 +1,23 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "body_markdown": {
+      "minLength": 1,
+      "title": "Body Markdown",
+      "type": "string"
+    },
+    "dispositions": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 40,
+      "title": "Dispositions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "body_markdown"
+  ],
+  "title": "ChairScienceRevision",
+  "type": "object"
+}

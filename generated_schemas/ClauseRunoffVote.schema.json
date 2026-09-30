@@ -1,0 +1,21 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "option_set_id": {
+      "minLength": 1,
+      "title": "Option Set Id",
+      "type": "string"
+    },
+    "choice": {
+      "minLength": 1,
+      "title": "Choice",
+      "type": "string"
+    }
+  },
+  "required": [
+    "option_set_id",
+    "choice"
+  ],
+  "title": "ClauseRunoffVote",
+  "type": "object"
+}

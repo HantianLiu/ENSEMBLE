@@ -1,0 +1,10 @@
+request_id: C-XXXX
+source_meeting: M-XXXX
+raised_by: HUMAN_OR_EXECUTION_CONTEXT
+
+source_reference: ""
+ambiguity: ""
+material_consequence: ""
+known_options: []
+
+requested_human_action: "clarify / reconvene / defer"

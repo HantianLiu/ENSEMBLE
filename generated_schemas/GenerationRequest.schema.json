@@ -1,0 +1,69 @@
+{
+  "$defs": {
+    "ReasoningEffort": {
+      "description": "Provider-neutral reasoning control frozen when a meeting is created.",
+      "enum": [
+        "default",
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "ReasoningEffort",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "model_id": {
+      "title": "Model Id",
+      "type": "string"
+    },
+    "system_text": {
+      "title": "System Text",
+      "type": "string"
+    },
+    "user_text": {
+      "title": "User Text",
+      "type": "string"
+    },
+    "temperature": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Temperature"
+    },
+    "max_output_tokens": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Output Tokens"
+    },
+    "reasoning_effort": {
+      "$ref": "#/$defs/ReasoningEffort",
+      "default": "default"
+    },
+    "extra": {
+      "additionalProperties": true,
+      "title": "Extra",
+      "type": "object"
+    }
+  },
+  "required": [
+    "model_id",
+    "system_text",
+    "user_text"
+  ],
+  "title": "GenerationRequest",
+  "type": "object"
+}

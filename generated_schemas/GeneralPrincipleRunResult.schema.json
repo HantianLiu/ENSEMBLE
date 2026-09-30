@@ -1,0 +1,869 @@
+{
+  "$defs": {
+    "MeetingPhase": {
+      "enum": [
+        "INIT",
+        "INITIAL_DRAFT",
+        "RESEARCH_ROUND",
+        "RESEARCH_PLANNING",
+        "RESEARCH_OUTLINE_REVIEW",
+        "LITERATURE_MODULE_RESEARCH",
+        "LITERATURE_MODULE_DRAFTING",
+        "LITERATURE_MODULE_REVIEW",
+        "LITERATURE_MODULE_CONFIRMATION",
+        "LITERATURE_REPORT_SYNTHESIS",
+        "LITERATURE_REPORT_REVIEW",
+        "LITERATURE_REPORT_PUBLICATION",
+        "SCHOLARLY_RENDERING_PLAN",
+        "SCHOLARLY_RENDERING_DRAFT",
+        "SCHOLARLY_SCIENCE_REVIEW",
+        "SCHOLARLY_CITATION_REVIEW",
+        "SCHOLARLY_RENDERING_PUBLICATION",
+        "GENERAL_POSITION",
+        "AMENDMENT_SUBMISSION",
+        "COSPONSORSHIP",
+        "BALLOT",
+        "GENERAL_RATIFICATION",
+        "STATUS_TRANSITION",
+        "DETAILED_DRAFTING",
+        "CLAUSE_REVIEW",
+        "RESOLUTION_FROZEN",
+        "CHAIR_REVIEW",
+        "THINK_TANK_REVIEW",
+        "HUMAN_REVIEW",
+        "HANDOFF_READY",
+        "PAUSED",
+        "CLOSED"
+      ],
+      "title": "MeetingPhase",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "initial_drafter_id": {
+      "title": "Initial Drafter Id",
+      "type": "string"
+    },
+    "draft_path": {
+      "title": "Draft Path",
+      "type": "string"
+    },
+    "position_count": {
+      "title": "Position Count",
+      "type": "integer"
+    },
+    "amendment_count": {
+      "title": "Amendment Count",
+      "type": "integer"
+    },
+    "amendment_order": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Amendment Order",
+      "type": "array"
+    },
+    "cosponsorship_submission_count": {
+      "title": "Cosponsorship Submission Count",
+      "type": "integer"
+    },
+    "ballot_count": {
+      "default": 0,
+      "title": "Ballot Count",
+      "type": "integer"
+    },
+    "adopted_amendment_count": {
+      "default": 0,
+      "title": "Adopted Amendment Count",
+      "type": "integer"
+    },
+    "rejected_amendment_count": {
+      "default": 0,
+      "title": "Rejected Amendment Count",
+      "type": "integer"
+    },
+    "deferred_amendment_count": {
+      "default": 0,
+      "title": "Deferred Amendment Count",
+      "type": "integer"
+    },
+    "current_draft_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Draft Path"
+    },
+    "completed_window_count": {
+      "default": 0,
+      "title": "Completed Window Count",
+      "type": "integer"
+    },
+    "ratified": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ratified"
+    },
+    "ratification_yes_votes": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ratification Yes Votes"
+    },
+    "ratification_required_yes_votes": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ratification Required Yes Votes"
+    },
+    "atomic_item_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Atomic Item Count"
+    },
+    "retained_atomic_item_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retained Atomic Item Count"
+    },
+    "primary_drafter_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Primary Drafter Id"
+    },
+    "primary_drafter_candidate_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Primary Drafter Candidate Count"
+    },
+    "consultative_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Consultative Count"
+    },
+    "atomic_item_policy_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Atomic Item Policy Status"
+    },
+    "atomic_item_review_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Atomic Item Review Status"
+    },
+    "detailed_draft_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Draft Path"
+    },
+    "detailed_clause_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Clause Count"
+    },
+    "detailed_review_submission_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Review Submission Count"
+    },
+    "detailed_clause_proposal_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Clause Proposal Count"
+    },
+    "detailed_split_motion_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Split Motion Count"
+    },
+    "detailed_suspension_motion_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Suspension Motion Count"
+    },
+    "adopted_detailed_split_motion_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Adopted Detailed Split Motion Count"
+    },
+    "adopted_detailed_suspension_motion_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Adopted Detailed Suspension Motion Count"
+    },
+    "detailed_option_set_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Option Set Count"
+    },
+    "detailed_type_i_option_set_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type I Option Set Count"
+    },
+    "detailed_type_ii_option_set_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Option Set Count"
+    },
+    "detailed_type_iii_option_set_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Iii Option Set Count"
+    },
+    "detailed_initial_clause_ballot_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Initial Clause Ballot Count"
+    },
+    "detailed_completed_option_set_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Completed Option Set Count"
+    },
+    "detailed_type_i_direct_adoption_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type I Direct Adoption Count"
+    },
+    "detailed_type_i_followup_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type I Followup Count"
+    },
+    "detailed_type_ii_direct_adoption_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Direct Adoption Count"
+    },
+    "detailed_type_ii_followup_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Followup Count"
+    },
+    "detailed_type_iii_runoff_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Iii Runoff Count"
+    },
+    "detailed_completed_type_iii_runoff_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Completed Type Iii Runoff Count"
+    },
+    "detailed_type_iii_runoff_direct_adoption_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Iii Runoff Direct Adoption Count"
+    },
+    "detailed_type_iii_runoff_explanation_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Iii Runoff Explanation Count"
+    },
+    "detailed_type_ii_explanation_submission_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Explanation Submission Count"
+    },
+    "detailed_type_ii_second_ballot_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Second Ballot Count"
+    },
+    "detailed_type_ii_second_ballot_adoption_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Second Ballot Adoption Count"
+    },
+    "detailed_type_ii_contested_outcome_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii Contested Outcome Count"
+    },
+    "detailed_type_ii_new_option_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Type Ii New Option Count"
+    },
+    "detailed_applied_proposal_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Applied Proposal Count"
+    },
+    "detailed_contested_proposal_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Contested Proposal Count"
+    },
+    "current_detailed_draft_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Detailed Draft Path"
+    },
+    "detailed_chair_certification_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Chair Certification Status"
+    },
+    "detailed_certified_resolution_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Certified Resolution Path"
+    },
+    "detailed_librarian_review_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Librarian Review Count"
+    },
+    "detailed_think_tank_material_finding_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Think Tank Material Finding Count"
+    },
+    "detailed_think_tank_reconvene_recommendation_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Think Tank Reconvene Recommendation Count"
+    },
+    "detailed_chair_handoff_brief_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Chair Handoff Brief Path"
+    },
+    "detailed_think_tank_execution_review_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Think Tank Execution Review Path"
+    },
+    "detailed_think_tank_execution_review_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Think Tank Execution Review Count"
+    },
+    "detailed_human_review_packet_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Human Review Packet Path"
+    },
+    "detailed_chair_readability_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Chair Readability Status"
+    },
+    "detailed_chair_readability_certification_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Chair Readability Certification Path"
+    },
+    "detailed_final_report_markdown_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Final Report Markdown Path"
+    },
+    "detailed_final_report_pdf_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Final Report Pdf Path"
+    },
+    "detailed_final_publication_manifest_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Final Publication Manifest Path"
+    },
+    "detailed_minority_report_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Minority Report Count"
+    },
+    "detailed_audit_requester_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Audit Requester Count"
+    },
+    "detailed_audit_petition_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Audit Petition Count"
+    },
+    "detailed_audit_petition_bundle_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Audit Petition Bundle Path"
+    },
+    "detailed_chair_accountability_report_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Chair Accountability Report Path"
+    },
+    "detailed_chair_accountability_cli_brief_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detailed Chair Accountability Cli Brief Path"
+    },
+    "research_round_count": {
+      "default": 0,
+      "title": "Research Round Count",
+      "type": "integer"
+    },
+    "research_evidence_packet_count": {
+      "default": 0,
+      "title": "Research Evidence Packet Count",
+      "type": "integer"
+    },
+    "next_phase": {
+      "$ref": "#/$defs/MeetingPhase"
+    },
+    "paused_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Paused Reason"
+    }
+  },
+  "required": [
+    "meeting_id",
+    "initial_drafter_id",
+    "draft_path",
+    "position_count",
+    "amendment_count",
+    "amendment_order",
+    "cosponsorship_submission_count",
+    "next_phase"
+  ],
+  "title": "GeneralPrincipleRunResult",
+  "type": "object"
+}

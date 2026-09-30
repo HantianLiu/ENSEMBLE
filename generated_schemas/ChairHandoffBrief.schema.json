@@ -1,0 +1,51 @@
+{
+  "properties": {
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "task_goal": {
+      "title": "Task Goal",
+      "type": "string"
+    },
+    "approved_constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Approved Constraints",
+      "type": "array"
+    },
+    "provenance_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Provenance Refs",
+      "type": "array"
+    },
+    "contested_items": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Contested Items",
+      "type": "array"
+    },
+    "deliverables": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Deliverables",
+      "type": "array"
+    },
+    "freeform": {
+      "additionalProperties": true,
+      "title": "Freeform",
+      "type": "object"
+    }
+  },
+  "required": [
+    "meeting_id",
+    "task_goal"
+  ],
+  "title": "ChairHandoffBrief",
+  "type": "object"
+}

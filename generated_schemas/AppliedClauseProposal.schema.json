@@ -1,0 +1,49 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "proposal_id": {
+      "minLength": 1,
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "target_clause_id": {
+      "pattern": "^[0-9]+\\.[0-9]+(?:-[A-Z]+)?$",
+      "title": "Target Clause Id",
+      "type": "string"
+    },
+    "proposal_type": {
+      "enum": [
+        "SUPPLEMENT",
+        "REPLACE",
+        "NEW_OPTION"
+      ],
+      "title": "Proposal Type",
+      "type": "string"
+    },
+    "source_text_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Text Sha256",
+      "type": "string"
+    },
+    "applied_excerpt": {
+      "minLength": 1,
+      "title": "Applied Excerpt",
+      "type": "string"
+    },
+    "application_summary": {
+      "minLength": 1,
+      "title": "Application Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "proposal_id",
+    "target_clause_id",
+    "proposal_type",
+    "source_text_sha256",
+    "applied_excerpt",
+    "application_summary"
+  ],
+  "title": "AppliedClauseProposal",
+  "type": "object"
+}

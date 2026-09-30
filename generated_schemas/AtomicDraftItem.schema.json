@@ -1,0 +1,70 @@
+{
+  "properties": {
+    "item_id": {
+      "title": "Item Id",
+      "type": "string"
+    },
+    "adopted": {
+      "title": "Adopted",
+      "type": "boolean"
+    },
+    "author": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Author"
+    },
+    "co_authors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Co Authors",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "co_sponsors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Co Sponsors",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "source_type": {
+      "title": "Source Type",
+      "type": "string"
+    },
+    "source_references": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Source References",
+      "type": "array"
+    },
+    "retention_basis": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retention Basis"
+    }
+  },
+  "required": [
+    "item_id",
+    "adopted",
+    "source_type"
+  ],
+  "title": "AtomicDraftItem",
+  "type": "object"
+}

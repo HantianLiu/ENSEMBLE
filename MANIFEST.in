@@ -1,0 +1,9 @@
+recursive-include docs/governance *.md *.json
+recursive-include docs/governance_legacy_2026_09_23 *.md *.json
+recursive-include examples *.toml
+recursive-include src/project_ensemble/assets/fonts *.ttf LICENSE.txt
+include LICENSE
+include README.md
+include README_v071.md
+include README_v071.en.md
+include THIRD_PARTY_NOTICES.md

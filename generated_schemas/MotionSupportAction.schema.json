@@ -1,0 +1,14 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "supported_motion_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Supported Motion Ids",
+      "type": "array"
+    }
+  },
+  "title": "MotionSupportAction",
+  "type": "object"
+}

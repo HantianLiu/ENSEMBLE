@@ -1,0 +1,15 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_id": {
+      "minLength": 1,
+      "title": "Candidate Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "candidate_id"
+  ],
+  "title": "PrimaryDrafterChoice",
+  "type": "object"
+}

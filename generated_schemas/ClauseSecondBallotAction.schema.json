@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "ClauseSecondVote": {
+      "additionalProperties": false,
+      "properties": {
+        "option_set_id": {
+          "minLength": 1,
+          "title": "Option Set Id",
+          "type": "string"
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Choice"
+        },
+        "new_option": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenuinelyNewClauseOption"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "option_set_id"
+      ],
+      "title": "ClauseSecondVote",
+      "type": "object"
+    },
+    "GenuinelyNewClauseOption": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "substantive_gain": {
+          "minLength": 1,
+          "title": "Substantive Gain",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "reason",
+        "substantive_gain"
+      ],
+      "title": "GenuinelyNewClauseOption",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "votes": {
+      "items": {
+        "$ref": "#/$defs/ClauseSecondVote"
+      },
+      "title": "Votes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "votes"
+  ],
+  "title": "ClauseSecondBallotAction",
+  "type": "object"
+}

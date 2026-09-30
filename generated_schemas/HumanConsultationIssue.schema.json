@@ -1,0 +1,109 @@
+{
+  "$defs": {
+    "ThresholdRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "formula": {
+          "minLength": 1,
+          "title": "Formula",
+          "type": "string"
+        },
+        "comparison": {
+          "minLength": 1,
+          "title": "Comparison",
+          "type": "string"
+        },
+        "eligible_count": {
+          "exclusiveMinimum": 0,
+          "title": "Eligible Count",
+          "type": "integer"
+        },
+        "required_votes": {
+          "exclusiveMinimum": 0,
+          "title": "Required Votes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "formula",
+        "comparison",
+        "eligible_count",
+        "required_votes"
+      ],
+      "title": "ThresholdRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "issue_id": {
+      "title": "Issue Id",
+      "type": "string"
+    },
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "reason_code": {
+      "title": "Reason Code",
+      "type": "string"
+    },
+    "stage": {
+      "title": "Stage",
+      "type": "string"
+    },
+    "question": {
+      "minLength": 1,
+      "title": "Question",
+      "type": "string"
+    },
+    "options": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "title": "Options",
+      "type": "array"
+    },
+    "affected_items": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Affected Items",
+      "type": "array"
+    },
+    "context": {
+      "additionalProperties": true,
+      "title": "Context",
+      "type": "object"
+    },
+    "thresholds": {
+      "items": {
+        "$ref": "#/$defs/ThresholdRecord"
+      },
+      "title": "Thresholds",
+      "type": "array"
+    },
+    "status": {
+      "default": "OPEN",
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "issue_id",
+    "meeting_id",
+    "reason_code",
+    "stage",
+    "question",
+    "options"
+  ],
+  "title": "HumanConsultationIssue",
+  "type": "object"
+}

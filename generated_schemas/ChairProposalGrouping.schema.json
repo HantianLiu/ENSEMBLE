@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "target_clause_id": {
+      "pattern": "^[0-9]+\\.[0-9]+(?:-[A-Z]+)?$",
+      "title": "Target Clause Id",
+      "type": "string"
+    },
+    "relationship": {
+      "enum": [
+        "INDEPENDENT",
+        "MUTUALLY_EXCLUSIVE"
+      ],
+      "title": "Relationship",
+      "type": "string"
+    },
+    "proposal_ids": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Proposal Ids",
+      "type": "array"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target_clause_id",
+    "relationship",
+    "proposal_ids",
+    "reason"
+  ],
+  "title": "ChairProposalGrouping",
+  "type": "object"
+}

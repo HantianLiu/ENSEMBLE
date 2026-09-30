@@ -1,0 +1,32 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "target_clause_id": {
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "title": "Target Clause Id",
+      "type": "string"
+    },
+    "category": {
+      "enum": [
+        "EVIDENCE_INSUFFICIENT",
+        "PROCEDURAL_CONTRADICTION",
+        "UNSAFE_CONSEQUENCE",
+        "UNRESOLVABLE_AMBIGUITY"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target_clause_id",
+    "category",
+    "reason"
+  ],
+  "title": "SuspensionMotion",
+  "type": "object"
+}

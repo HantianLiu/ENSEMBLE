@@ -1,0 +1,38 @@
+{
+  "$defs": {
+    "AmendmentType": {
+      "enum": [
+        "OBJECTION",
+        "SUPPLEMENTARY"
+      ],
+      "title": "AmendmentType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "text": {
+      "minLength": 1,
+      "title": "Text",
+      "type": "string"
+    },
+    "declared_type": {
+      "$ref": "#/$defs/AmendmentType"
+    },
+    "declared_impact_scope": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Declared Impact Scope",
+      "type": "array"
+    }
+  },
+  "required": [
+    "text",
+    "declared_type",
+    "declared_impact_scope"
+  ],
+  "title": "ProposedAmendment",
+  "type": "object"
+}

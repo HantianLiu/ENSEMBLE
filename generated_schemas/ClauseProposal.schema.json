@@ -1,0 +1,37 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "target_clause_id": {
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "title": "Target Clause Id",
+      "type": "string"
+    },
+    "proposal_type": {
+      "enum": [
+        "SUPPLEMENT",
+        "REPLACE",
+        "NEW_OPTION"
+      ],
+      "title": "Proposal Type",
+      "type": "string"
+    },
+    "text": {
+      "minLength": 1,
+      "title": "Text",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target_clause_id",
+    "proposal_type",
+    "text",
+    "reason"
+  ],
+  "title": "ClauseProposal",
+  "type": "object"
+}

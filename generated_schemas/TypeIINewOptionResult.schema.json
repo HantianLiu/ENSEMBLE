@@ -1,0 +1,28 @@
+{
+  "properties": {
+    "effective_option_sets_path": {
+      "title": "Effective Option Sets Path",
+      "type": "string"
+    },
+    "outcomes_path": {
+      "title": "Outcomes Path",
+      "type": "string"
+    },
+    "qualified_new_option_count": {
+      "title": "Qualified New Option Count",
+      "type": "integer"
+    },
+    "reconstructed_option_set_count": {
+      "title": "Reconstructed Option Set Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "effective_option_sets_path",
+    "outcomes_path",
+    "qualified_new_option_count",
+    "reconstructed_option_set_count"
+  ],
+  "title": "TypeIINewOptionResult",
+  "type": "object"
+}

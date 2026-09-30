@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "GamingPattern": {
+      "enum": [
+        "blanket_cosponsorship",
+        "conflicting_cosponsorship",
+        "atomic_item_fragmentation",
+        "semantic_duplicate_amendment",
+        "timing_exploitation",
+        "backtracking_exploitation",
+        "amendment_category_gaming",
+        "low_information_drafting_credit",
+        "other"
+      ],
+      "title": "GamingPattern",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "representative_id": {
+      "title": "Representative Id",
+      "type": "string"
+    },
+    "pattern": {
+      "$ref": "#/$defs/GamingPattern"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "procedural_effect": {
+      "default": "none",
+      "title": "Procedural Effect",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "meeting_id",
+    "representative_id",
+    "pattern"
+  ],
+  "title": "StrategicBehaviorEvent",
+  "type": "object"
+}

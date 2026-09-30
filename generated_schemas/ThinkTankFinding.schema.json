@@ -1,0 +1,57 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "severity": {
+      "enum": [
+        "NOTE",
+        "CAUTION",
+        "MATERIAL"
+      ],
+      "title": "Severity",
+      "type": "string"
+    },
+    "category": {
+      "enum": [
+        "OMISSION",
+        "DEFINITION",
+        "ASSUMPTION",
+        "EVIDENCE",
+        "CONTRADICTION",
+        "VERIFICATION",
+        "LITERATURE_OR_BENCHMARK",
+        "PROVENANCE",
+        "CONCLUSION_STRENGTH",
+        "TRIAL_POLICY"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "finding": {
+      "minLength": 1,
+      "title": "Finding",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "human_attention": {
+      "minLength": 1,
+      "title": "Human Attention",
+      "type": "string"
+    }
+  },
+  "required": [
+    "severity",
+    "category",
+    "finding",
+    "evidence_refs",
+    "human_attention"
+  ],
+  "title": "ThinkTankFinding",
+  "type": "object"
+}

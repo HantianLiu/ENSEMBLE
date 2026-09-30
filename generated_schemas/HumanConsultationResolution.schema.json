@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "ThresholdRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "formula": {
+          "minLength": 1,
+          "title": "Formula",
+          "type": "string"
+        },
+        "comparison": {
+          "minLength": 1,
+          "title": "Comparison",
+          "type": "string"
+        },
+        "eligible_count": {
+          "exclusiveMinimum": 0,
+          "title": "Eligible Count",
+          "type": "integer"
+        },
+        "required_votes": {
+          "exclusiveMinimum": 0,
+          "title": "Required Votes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "formula",
+        "comparison",
+        "eligible_count",
+        "required_votes"
+      ],
+      "title": "ThresholdRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "issue_id": {
+      "title": "Issue Id",
+      "type": "string"
+    },
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "decision": {
+      "minLength": 1,
+      "title": "Decision",
+      "type": "string"
+    },
+    "rationale": {
+      "minLength": 1,
+      "title": "Rationale",
+      "type": "string"
+    },
+    "human_wording": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Human Wording"
+    },
+    "scope": {
+      "minLength": 1,
+      "title": "Scope",
+      "type": "string"
+    },
+    "thresholds": {
+      "items": {
+        "$ref": "#/$defs/ThresholdRecord"
+      },
+      "title": "Thresholds",
+      "type": "array"
+    },
+    "authority": {
+      "default": "HUMAN",
+      "enum": [
+        "HUMAN",
+        "DELEGATED_CHAIR"
+      ],
+      "title": "Authority",
+      "type": "string"
+    },
+    "authorization_record_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Authorization Record Path"
+    }
+  },
+  "required": [
+    "issue_id",
+    "meeting_id",
+    "decision",
+    "rationale",
+    "scope",
+    "thresholds"
+  ],
+  "title": "HumanConsultationResolution",
+  "type": "object"
+}

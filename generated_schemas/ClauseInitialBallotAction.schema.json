@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "ClauseInitialVote": {
+      "additionalProperties": false,
+      "properties": {
+        "option_set_id": {
+          "minLength": 1,
+          "title": "Option Set Id",
+          "type": "string"
+        },
+        "choice": {
+          "minLength": 1,
+          "title": "Choice",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "option_set_id",
+        "choice"
+      ],
+      "title": "ClauseInitialVote",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "votes": {
+      "items": {
+        "$ref": "#/$defs/ClauseInitialVote"
+      },
+      "title": "Votes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "votes"
+  ],
+  "title": "ClauseInitialBallotAction",
+  "type": "object"
+}

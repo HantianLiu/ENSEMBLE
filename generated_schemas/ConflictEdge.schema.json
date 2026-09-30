@@ -1,0 +1,28 @@
+{
+  "properties": {
+    "a": {
+      "title": "A",
+      "type": "string"
+    },
+    "b": {
+      "title": "B",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "ruling_id": {
+      "title": "Ruling Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "a",
+    "b",
+    "reason",
+    "ruling_id"
+  ],
+  "title": "ConflictEdge",
+  "type": "object"
+}

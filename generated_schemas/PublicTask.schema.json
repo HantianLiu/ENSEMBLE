@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "DeliverableType": {
+      "description": "The artifact a meeting is expected to produce, independent of procedure.",
+      "enum": [
+        "normative_instrument",
+        "literature_review",
+        "scholarly_rendering"
+      ],
+      "title": "DeliverableType",
+      "type": "string"
+    },
+    "MeetingType": {
+      "enum": [
+        "deliberation",
+        "audit",
+        "research",
+        "scholarly_rendering"
+      ],
+      "title": "MeetingType",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "title": {
+      "default": "未命名会议",
+      "title": "Title",
+      "type": "string"
+    },
+    "meeting_type": {
+      "$ref": "#/$defs/MeetingType"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "deliverable_type": {
+      "$ref": "#/$defs/DeliverableType",
+      "default": "normative_instrument"
+    }
+  },
+  "required": [
+    "meeting_id",
+    "meeting_type",
+    "description"
+  ],
+  "title": "PublicTask",
+  "type": "object"
+}

@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "ScienceObjection": {
+      "additionalProperties": false,
+      "properties": {
+        "issue": {
+          "maxLength": 1200,
+          "minLength": 1,
+          "title": "Issue",
+          "type": "string"
+        },
+        "proposed_wording": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Proposed Wording"
+        },
+        "requires_external_verification": {
+          "default": false,
+          "title": "Requires External Verification",
+          "type": "boolean"
+        },
+        "verification_claim": {
+          "anyOf": [
+            {
+              "maxLength": 1200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verification Claim"
+        }
+      },
+      "required": [
+        "issue"
+      ],
+      "title": "ScienceObjection",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "vote": {
+      "enum": [
+        "YES",
+        "NO"
+      ],
+      "title": "Vote",
+      "type": "string"
+    },
+    "objections": {
+      "items": {
+        "$ref": "#/$defs/ScienceObjection"
+      },
+      "maxItems": 8,
+      "title": "Objections",
+      "type": "array"
+    },
+    "style_note": {
+      "anyOf": [
+        {
+          "maxLength": 700,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Style Note"
+    }
+  },
+  "required": [
+    "vote"
+  ],
+  "title": "ScienceReview",
+  "type": "object"
+}

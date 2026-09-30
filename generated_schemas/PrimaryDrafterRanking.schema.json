@@ -1,0 +1,18 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_ids": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "title": "Candidate Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "candidate_ids"
+  ],
+  "title": "PrimaryDrafterRanking",
+  "type": "object"
+}

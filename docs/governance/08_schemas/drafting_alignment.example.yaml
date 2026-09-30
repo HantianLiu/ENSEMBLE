@@ -1,0 +1,17 @@
+meeting_id: M-XXXX
+final_general_principle_version: D3
+
+atomic_items:
+  - item_id: GP-001
+    status: ADOPTED
+    source_type: INITIAL_DRAFT_OR_AMENDMENT
+    direct_author: R-XXX
+    co_sponsors: []
+
+scores:
+  R-XXX:
+    direct_adopted_items: 0
+    cosponsored_adopted_items: 0
+    score: 0.0
+
+formula: "direct_adopted_items + 0.5 * cosponsored_adopted_items"

@@ -1,0 +1,32 @@
+{
+  "properties": {
+    "scores": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Scores",
+      "type": "object"
+    },
+    "authored_adopted": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Authored Adopted",
+      "type": "object"
+    },
+    "cosponsored_adopted": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Cosponsored Adopted",
+      "type": "object"
+    }
+  },
+  "required": [
+    "scores",
+    "authored_adopted",
+    "cosponsored_adopted"
+  ],
+  "title": "DraftingAlignmentResult",
+  "type": "object"
+}

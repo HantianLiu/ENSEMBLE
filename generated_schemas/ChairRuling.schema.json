@@ -1,0 +1,48 @@
+{
+  "properties": {
+    "ruling_id": {
+      "title": "Ruling Id",
+      "type": "string"
+    },
+    "amendment_id": {
+      "title": "Amendment Id",
+      "type": "string"
+    },
+    "field": {
+      "title": "Field",
+      "type": "string"
+    },
+    "before": {
+      "title": "Before"
+    },
+    "after": {
+      "title": "After"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "procedural_effect": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Procedural Effect"
+    }
+  },
+  "required": [
+    "ruling_id",
+    "amendment_id",
+    "field",
+    "before",
+    "after",
+    "reason"
+  ],
+  "title": "ChairRuling",
+  "type": "object"
+}

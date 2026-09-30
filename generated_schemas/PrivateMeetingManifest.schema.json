@@ -1,0 +1,616 @@
+{
+  "$defs": {
+    "DecisionRigor": {
+      "description": "Human-selected high-threshold policy for this meeting.",
+      "enum": [
+        "strict",
+        "relaxed"
+      ],
+      "title": "DecisionRigor",
+      "type": "string"
+    },
+    "DeliverableType": {
+      "description": "The artifact a meeting is expected to produce, independent of procedure.",
+      "enum": [
+        "normative_instrument",
+        "literature_review",
+        "scholarly_rendering"
+      ],
+      "title": "DeliverableType",
+      "type": "string"
+    },
+    "InheritanceMode": {
+      "description": "Public assets copied from a completed parent into a new meeting.",
+      "enum": [
+        "evidence",
+        "final_document",
+        "both"
+      ],
+      "title": "InheritanceMode",
+      "type": "string"
+    },
+    "MeetingType": {
+      "enum": [
+        "deliberation",
+        "audit",
+        "research",
+        "scholarly_rendering"
+      ],
+      "title": "MeetingType",
+      "type": "string"
+    },
+    "ReasoningEffort": {
+      "description": "Provider-neutral reasoning control frozen when a meeting is created.",
+      "enum": [
+        "default",
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "ReasoningEffort",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "title": {
+      "default": "未命名会议",
+      "title": "Title",
+      "type": "string"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "selected_models": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Selected Models",
+      "type": "array"
+    },
+    "chair_model": {
+      "anyOf": [
+        {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Chair Model"
+    },
+    "meeting_type": {
+      "$ref": "#/$defs/MeetingType",
+      "default": "deliberation"
+    },
+    "personas": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Personas",
+      "type": "array"
+    },
+    "governance_digest": {
+      "title": "Governance Digest",
+      "type": "string"
+    },
+    "software_version": {
+      "default": "0.7.1",
+      "title": "Software Version",
+      "type": "string"
+    },
+    "governance_version": {
+      "default": "0.7.1",
+      "title": "Governance Version",
+      "type": "string"
+    },
+    "representative_prompt_family": {
+      "default": "legacy_shared",
+      "enum": [
+        "legacy_shared",
+        "deliberation",
+        "literature_research"
+      ],
+      "title": "Representative Prompt Family",
+      "type": "string"
+    },
+    "representative_reasoning_effort": {
+      "$ref": "#/$defs/ReasoningEffort",
+      "default": "default"
+    },
+    "representative_reasoning_effective": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ReasoningEffort"
+      },
+      "title": "Representative Reasoning Effective",
+      "type": "object"
+    },
+    "chair_reasoning_effort": {
+      "$ref": "#/$defs/ReasoningEffort",
+      "default": "default"
+    },
+    "research_enabled": {
+      "default": false,
+      "title": "Research Enabled",
+      "type": "boolean"
+    },
+    "planning_exploration_enabled": {
+      "default": false,
+      "title": "Planning Exploration Enabled",
+      "type": "boolean"
+    },
+    "decision_rigor": {
+      "$ref": "#/$defs/DecisionRigor",
+      "default": "strict"
+    },
+    "research_model": {
+      "anyOf": [
+        {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Research Model"
+    },
+    "research_reasoning_effort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "openalex_max_results_per_query": {
+      "anyOf": [
+        {
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Openalex Max Results Per Query"
+    },
+    "openalex_quota_policy": {
+      "anyOf": [
+        {
+          "enum": [
+            "wait",
+            "tavily"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Openalex Quota Policy"
+    },
+    "research_max_concurrent_claim_groups": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Research Max Concurrent Claim Groups"
+    },
+    "model_concurrency_limits": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Model Concurrency Limits",
+      "type": "object"
+    },
+    "model_concurrency_sources": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Model Concurrency Sources",
+      "type": "object"
+    },
+    "maximum_parallelism": {
+      "default": false,
+      "title": "Maximum Parallelism",
+      "type": "boolean"
+    },
+    "deliverable_type": {
+      "$ref": "#/$defs/DeliverableType",
+      "default": "normative_instrument"
+    },
+    "parent_meeting_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Meeting Id"
+    },
+    "parent_meeting_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Meeting Path"
+    },
+    "inheritance_mode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InheritanceMode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "rendering_provisional_source": {
+      "default": false,
+      "title": "Rendering Provisional Source",
+      "type": "boolean"
+    },
+    "rendering_science_models": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Rendering Science Models",
+      "type": "array"
+    },
+    "rendering_citation_models": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Rendering Citation Models",
+      "type": "array"
+    },
+    "rendering_language": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Language"
+    },
+    "deliberation_language": {
+      "anyOf": [
+        {
+          "enum": [
+            "task",
+            "zh",
+            "en",
+            "fr"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Deliberation Language"
+    },
+    "rendering_academic_skeleton": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Academic Skeleton"
+    },
+    "rendering_full_abstract": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Full Abstract"
+    },
+    "rendering_section_abstracts": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Section Abstracts"
+    },
+    "rendering_segmentation": {
+      "anyOf": [
+        {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Segmentation"
+    },
+    "rendering_liveliness": {
+      "anyOf": [
+        {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Liveliness"
+    },
+    "rendering_output_formats": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rendering Output Formats",
+      "type": "array"
+    },
+    "rendering_science_order": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rendering Science Order",
+      "type": "array"
+    },
+    "rendering_science_consultation_authority": {
+      "default": "human",
+      "enum": [
+        "human",
+        "chair"
+      ],
+      "title": "Rendering Science Consultation Authority",
+      "type": "string"
+    },
+    "rendering_final_science_query_limit": {
+      "anyOf": [
+        {
+          "maximum": 4,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Final Science Query Limit"
+    },
+    "rendering_target_body_characters": {
+      "anyOf": [
+        {
+          "minimum": 1000,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Target Body Characters"
+    },
+    "rendering_scope_description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Scope Description"
+    },
+    "literature_writing_policy": {
+      "anyOf": [
+        {
+          "enum": [
+            "v071",
+            "fast"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Literature Writing Policy"
+    },
+    "writer_model": {
+      "anyOf": [
+        {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Writer Model"
+    },
+    "writer_reasoning_effort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "fast_planner_models": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Fast Planner Models",
+      "type": "array"
+    },
+    "fast_planner_reasoning_effective": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ReasoningEffort"
+      },
+      "title": "Fast Planner Reasoning Effective",
+      "type": "object"
+    },
+    "technician_model": {
+      "anyOf": [
+        {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Technician Model"
+    },
+    "technician_reasoning_effort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "meeting_id",
+    "created_at",
+    "selected_models",
+    "chair_model",
+    "personas",
+    "governance_digest"
+  ],
+  "title": "PrivateMeetingManifest",
+  "type": "object"
+}

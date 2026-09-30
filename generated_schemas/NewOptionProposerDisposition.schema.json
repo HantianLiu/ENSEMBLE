@@ -1,0 +1,32 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "ACCEPT_NORMALIZATION",
+        "REVISE",
+        "OBJECT_EXCLUSION",
+        "WITHDRAW"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "revised_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revised Text"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "title": "NewOptionProposerDisposition",
+  "type": "object"
+}

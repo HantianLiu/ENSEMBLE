@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "CitationVoteItem": {
+      "properties": {
+        "amendment_id": {
+          "title": "Amendment Id",
+          "type": "string"
+        },
+        "vote": {
+          "enum": [
+            "YES",
+            "NO"
+          ],
+          "title": "Vote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amendment_id",
+        "vote"
+      ],
+      "title": "CitationVoteItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "votes": {
+      "items": {
+        "$ref": "#/$defs/CitationVoteItem"
+      },
+      "maxItems": 100,
+      "title": "Votes",
+      "type": "array"
+    }
+  },
+  "title": "CitationVoteSet",
+  "type": "object"
+}

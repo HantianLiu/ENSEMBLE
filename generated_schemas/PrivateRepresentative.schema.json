@@ -1,0 +1,131 @@
+{
+  "$defs": {
+    "Persona": {
+      "enum": [
+        "systems_integrator",
+        "pragmatic_minimalist",
+        "exploratory_synthesist",
+        "librarian"
+      ],
+      "title": "Persona",
+      "type": "string"
+    },
+    "RenderingRole": {
+      "enum": [
+        "science_bookkeeper",
+        "citation_bookkeeper"
+      ],
+      "title": "RenderingRole",
+      "type": "string"
+    },
+    "RepresentativeStatus": {
+      "enum": [
+        "ACTIVE",
+        "CONSULTATIVE",
+        "UNAVAILABLE"
+      ],
+      "title": "RepresentativeStatus",
+      "type": "string"
+    },
+    "RuntimeConfig": {
+      "properties": {
+        "provider_id": {
+          "title": "Provider Id",
+          "type": "string"
+        },
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Persona"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rendering_role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenderingRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "harness": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Harness"
+        },
+        "reasoning_setting": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Setting"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Version"
+        },
+        "extra": {
+          "additionalProperties": true,
+          "title": "Extra",
+          "type": "object"
+        }
+      },
+      "required": [
+        "provider_id",
+        "model_id"
+      ],
+      "title": "RuntimeConfig",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "representative_id": {
+      "title": "Representative Id",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig"
+    },
+    "status": {
+      "$ref": "#/$defs/RepresentativeStatus",
+      "default": "ACTIVE"
+    }
+  },
+  "required": [
+    "representative_id",
+    "runtime"
+  ],
+  "title": "PrivateRepresentative",
+  "type": "object"
+}

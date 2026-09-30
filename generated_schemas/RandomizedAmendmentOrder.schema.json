@@ -1,0 +1,26 @@
+{
+  "properties": {
+    "seed": {
+      "title": "Seed",
+      "type": "string"
+    },
+    "algorithm": {
+      "default": "sha256(seed_bytes || NUL || amendment_id), ascending digest",
+      "title": "Algorithm",
+      "type": "string"
+    },
+    "order": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Order",
+      "type": "array"
+    }
+  },
+  "required": [
+    "seed",
+    "order"
+  ],
+  "title": "RandomizedAmendmentOrder",
+  "type": "object"
+}

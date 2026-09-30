@@ -1,0 +1,38 @@
+{
+  "$defs": {
+    "ReconstructedChoice": {
+      "additionalProperties": false,
+      "properties": {
+        "option_set_id": {
+          "title": "Option Set Id",
+          "type": "string"
+        },
+        "choice": {
+          "title": "Choice",
+          "type": "string"
+        }
+      },
+      "required": [
+        "option_set_id",
+        "choice"
+      ],
+      "title": "ReconstructedChoice",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "votes": {
+      "items": {
+        "$ref": "#/$defs/ReconstructedChoice"
+      },
+      "title": "Votes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "votes"
+  ],
+  "title": "ReconstructedBallot",
+  "type": "object"
+}

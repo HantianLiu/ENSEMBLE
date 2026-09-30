@@ -1,0 +1,186 @@
+{
+  "$defs": {
+    "DecisionRigor": {
+      "description": "Human-selected high-threshold policy for this meeting.",
+      "enum": [
+        "strict",
+        "relaxed"
+      ],
+      "title": "DecisionRigor",
+      "type": "string"
+    },
+    "DeliverableType": {
+      "description": "The artifact a meeting is expected to produce, independent of procedure.",
+      "enum": [
+        "normative_instrument",
+        "literature_review",
+        "scholarly_rendering"
+      ],
+      "title": "DeliverableType",
+      "type": "string"
+    },
+    "MeetingType": {
+      "enum": [
+        "deliberation",
+        "audit",
+        "research",
+        "scholarly_rendering"
+      ],
+      "title": "MeetingType",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "meeting_id": {
+      "title": "Meeting Id",
+      "type": "string"
+    },
+    "title": {
+      "default": "未命名会议",
+      "title": "Title",
+      "type": "string"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "meeting_type": {
+      "$ref": "#/$defs/MeetingType",
+      "default": "deliberation"
+    },
+    "participant_count": {
+      "title": "Participant Count",
+      "type": "integer"
+    },
+    "representative_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Representative Count"
+    },
+    "audit_member_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Audit Member Count"
+    },
+    "research_enabled": {
+      "default": false,
+      "title": "Research Enabled",
+      "type": "boolean"
+    },
+    "planning_exploration_enabled": {
+      "default": false,
+      "title": "Planning Exploration Enabled",
+      "type": "boolean"
+    },
+    "planning_replan_reference_enabled": {
+      "default": false,
+      "title": "Planning Replan Reference Enabled",
+      "type": "boolean"
+    },
+    "decision_rigor": {
+      "$ref": "#/$defs/DecisionRigor",
+      "default": "strict"
+    },
+    "deliverable_type": {
+      "$ref": "#/$defs/DeliverableType",
+      "default": "normative_instrument"
+    },
+    "parent_meeting_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Meeting Id"
+    },
+    "rendering_science_consultation_authority": {
+      "default": "human",
+      "enum": [
+        "human",
+        "chair"
+      ],
+      "title": "Rendering Science Consultation Authority",
+      "type": "string"
+    },
+    "rendering_final_science_query_limit": {
+      "anyOf": [
+        {
+          "maximum": 4,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Final Science Query Limit"
+    },
+    "rendering_target_body_characters": {
+      "anyOf": [
+        {
+          "minimum": 1000,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Target Body Characters"
+    },
+    "rendering_scope_description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendering Scope Description"
+    },
+    "literature_writing_policy": {
+      "anyOf": [
+        {
+          "enum": [
+            "v071",
+            "fast"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Literature Writing Policy"
+    }
+  },
+  "required": [
+    "meeting_id",
+    "created_at",
+    "participant_count"
+  ],
+  "title": "PublicMeetingManifest",
+  "type": "object"
+}
