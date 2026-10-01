@@ -13,6 +13,9 @@ from pydantic import ValidationError
 
 from project_ensemble.errors import ResearchQualityControlError, ResearchRequestRejectedError
 from project_ensemble.orchestration.engine import MeetingEngine
+from project_ensemble.orchestration.readability_policy import (
+    structured_prose_context_from_repo, structured_result_prose_contract,
+)
 from project_ensemble.runtime.structured_output import parse_json_object
 from project_ensemble.research.cache import ResearchPacketCache
 from project_ensemble.research.documents import (
@@ -120,6 +123,12 @@ class ResearchDesk:
 
     def update_model_concurrency_limit(self, limit: int) -> None:
         self._model_gate.set_limit(limit)
+
+    def _structured_prose_contract(self, *, planning_scope: bool = False) -> str:
+        preferences, disciplines = structured_prose_context_from_repo(self.repo)
+        return structured_result_prose_contract(
+            preferences, disciplines, planning_scope=planning_scope,
+        )
 
     def research(
         self,
@@ -620,8 +629,12 @@ class ResearchDesk:
             "行为使用 VOLATILE；标准、软件、API 和持续维护的文档使用 VERSIONED；基础理论、"
             "历史实验结果及其他变化缓慢的学术事实使用 STABLE。另将来源领域分类为 ACADEMIC、"
             "STANDARD_METHOD、SOFTWARE_API、CURRENT_FACT 或 GENERAL，并解释分类依据。"
+            "原始论文、学术理论、数学定义与研究方法的核查应归为 ACADEMIC；即使原文以网页或 PDF 形式提供，"
+            "也不要仅因载体是网页就归入 GENERAL。ACADEMIC 优先使用 OpenAlex，Tavily 仅作有界例外，"
+            "不得为了获得更多候选而默认并用付费网页检索。"
             "不确定时选择适用类别中有效期较短的一类并说明原因。拒绝开放式的立场委托。只返回 JSON。"
         )
+        instruction_text += self._structured_prose_contract()
         schema_text = json.dumps(
             NormalizedClaim.model_json_schema(), indent=2, ensure_ascii=False
         )
@@ -673,7 +686,10 @@ class ResearchDesk:
         stage: str = "research_evidence_synthesis",
     ) -> ResearchSynthesis:
         legacy_instruction_text = (
-            "本任务只整理证据，不参与表决；只使用给定候选来源的元数据和摘要。不得替会议决定应相信、"
+            "本任务只整理证据，不参与表决；只使用下方候选来源实际提供的材料。元数据用于识别来源，"
+            "不能替代对具体内容的核查；每项具体发现都必须能在实际取得的相关摘录中定位。"
+            "摘要或搜索结果若未作为 source_read.excerpts 的实际摘录提供，只能作为检索线索；"
+            "若必须转述其本身的文字，应明确归属为摘要或检索摘要，不得据此推断全文方法、数值或细节。不得替会议决定应相信、"
             "提出、质疑、否决或拒绝什么。主动评估支持证据、反证、适用范围限制和经典替代方案；"
             "每项发现均引用 source_id。按来源对本主张的用途，将其分为 AUTHORITATIVE、PRIMARY、"
             "REVIEW、PROVISIONAL 或 DISCOVERY_ONLY。搜索摘要和普通发现页面属于 DISCOVERY_ONLY，"
@@ -691,6 +707,9 @@ class ResearchDesk:
             "共识状态推导任何一个维度。confidence 绝不是某位代表正确的概率。将筛选决定放在私有"
             "字段中，只返回 JSON。"
         )
+        # The legacy prompt layout below is also used for interrupted-call
+        # recovery; keep its natural-language constraints current as well.
+        legacy_instruction_text += self._structured_prose_contract()
         source_boundary_warning = (
             "\n\n【严格来源边界；违反即退回本条证据综合】候选来源不是写作提示，而是唯一可引用的"
             "来源集合。packet.sources、四类发现中的 source_id 和 screening_decisions 只能使用"
@@ -1029,6 +1048,7 @@ class ResearchDesk:
             "降级相应字段并说明仍未解决的问题。不得引入替代来源、新证据或新的实质主张。只返回 JSON。"
             "\n\n目标 JSON Schema：\n"
             + schema_text
+            + self._structured_prose_contract()
         )
         allowed_ids = [str(item["source_id"]) for item in candidates]
         user_text = (
@@ -1170,6 +1190,7 @@ class ResearchDesk:
                 "由于证据包已经冻结，included 字段必须等于给定的 already_in_evidence_packet 值。"
                 "理由仅依据给定元数据，用一句简短的话说明。不得修改或重现证据包。只返回 JSON。"
             )
+            instruction_text += self._structured_prose_contract()
             schema_text = json.dumps(
                 ScreeningDecisionSupplement.model_json_schema(),
                 indent=2,

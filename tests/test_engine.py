@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from project_ensemble.domain import DecisionRigor, GenerationResponse, ReasoningEffort
 from project_ensemble.errors import (
     EmptyModelOutputError,
+    ForcedModelReplacementRequested,
     InputContextLimitError,
     ModelReplacementRequested,
     OutputLimitReachedError,
@@ -16,6 +17,8 @@ from project_ensemble.errors import (
 from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.providers.fake import ScriptedProviderAdapter
 from project_ensemble.runtime.research_fallbacks import ResearchFallbacks
+from project_ensemble.runtime.model_replacements import ModelReplacementService
+from project_ensemble.runtime.progress import NullProgressReporter
 from project_ensemble.storage.meeting import MeetingRepository
 
 
@@ -73,6 +76,33 @@ def test_engine_records_success_without_putting_text_in_event_log(tmp_path):
     assert "PROVIDER_TOKEN_TELEMETRY_RECORDED" in event_text
     assert not notifier.calls
     assert repo.events.verify()
+
+
+def test_force_stopped_response_is_audited_but_never_recorded_as_exchange(tmp_path):
+    repo, representative_id = make_repo(tmp_path)
+
+    class SilentAdapter(ScriptedProviderAdapter):
+        def generate_with_progress(self, request, on_progress=None):
+            assert on_progress is not None
+            on_progress("heartbeat", 0, 0)
+            pytest.fail("force-stopped response must not be accepted")
+
+    class ForceProgress(NullProgressReporter):
+        def raise_if_force_control_requested(self):
+            raise ForcedModelReplacementRequested("forced by Human")
+
+    engine = MeetingEngine(
+        repo=repo,
+        adapters={"fake": SilentAdapter("fake", ["m"], [])},
+        notifier=CapturingNotifier(),
+        progress=ForceProgress(),
+    )
+    with pytest.raises(ForcedModelReplacementRequested):
+        engine.invoke_participant(
+            representative_id, system_text="s", user_text="u", stage="initial_draft"
+        )
+    assert "MODEL_CALL_FORCE_STOPPED" in repo.events.path.read_text()
+    assert not list((repo.root / "governance_private/provider_exchanges").glob("*.json"))
 
 
 def test_research_desk_once_backup_runs_only_after_primary_failure(tmp_path):
@@ -336,6 +366,200 @@ def test_recorded_response_recovery_accepts_only_context_section_reordering(tmp_
 
     assert recovered == original
     assert changed is None
+
+
+def test_recorded_response_before_model_replacement_is_not_reused(tmp_path):
+    repo, representative_id = make_repo(tmp_path)
+    adapter = ScriptedProviderAdapter("fake", ["m", "new"], ["old", "new"])
+    engine = MeetingEngine(repo=repo, adapters={"fake": adapter}, notifier=CapturingNotifier())
+    engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+    ModelReplacementService(repo).replace(
+        participant_id=representative_id, provider_id="fake", model_id="new",
+        reason="old response was unusable",
+    )
+
+    assert engine.find_recorded_response(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    ) is None
+    fresh = engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+    assert fresh.text == "new"
+    assert fresh.model_id == "new"
+
+
+def test_exhausted_schema_repair_quarantines_outputs_and_retries_original_once(tmp_path):
+    class Action(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        action: str
+
+    repo, representative_id = make_repo(tmp_path)
+    adapter = ScriptedProviderAdapter(
+        "fake", ["m"],
+        ['{"wrong":0}', '{"wrong":1}', '{"wrong":2}', '{"action":"SUPPORT"}'],
+    )
+    engine = MeetingEngine(repo=repo, adapters={"fake": adapter}, notifier=CapturingNotifier())
+    original = engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+
+    parsed = engine.validate_structured_response(
+        representative_id, response=original, schema_model=Action, stage="draft",
+        original_system_text="s", original_user_text="u", fresh_attempts_remaining=1,
+    )
+
+    assert parsed.action == "SUPPORT"
+    assert len(list((repo.root / "governance_private/invalid_model_outputs").glob("*.json"))) == 3
+    assert engine.find_recorded_response(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    ).text == '{"action":"SUPPORT"}'
+    assert repo.events.verify()
+
+
+def test_exhausted_schema_repair_can_be_retried_after_pause_without_old_output(tmp_path):
+    class Action(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        action: str
+
+    repo, representative_id = make_repo(tmp_path)
+    adapter = ScriptedProviderAdapter(
+        "fake", ["m"],
+        ['{"wrong":0}', '{"wrong":1}', '{"wrong":2}', '{"action":"RETRY"}'],
+    )
+    engine = MeetingEngine(repo=repo, adapters={"fake": adapter}, notifier=CapturingNotifier())
+    original = engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+    with pytest.raises(PolicyNotConfiguredError):
+        engine.validate_structured_response(
+            representative_id, response=original, schema_model=Action, stage="draft",
+        )
+    assert engine.find_recorded_response(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    ) is None
+    fresh = engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+    assert engine.validate_structured_response(
+        representative_id, response=fresh, schema_model=Action, stage="draft",
+    ).action == "RETRY"
+
+
+def test_technician_repairs_schema_before_original_task_is_regenerated(tmp_path):
+    class Action(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        action: str
+
+    gov = tmp_path / "gov"
+    gov.mkdir()
+    (gov / "rule.md").write_text("rule")
+    repo = MeetingRepository.create(
+        tmp_path / "ws", selected_models=[("fake", "m")],
+        chair_model=("fake", "m"), governance_docs=gov,
+        task_description="task", technician_model=("tech", "t"),
+        technician_reasoning_effort=ReasoningEffort.DEFAULT,
+    )
+    registry = json.loads(
+        (repo.root / "identity_private/representative_registry.json").read_text()
+    )
+    representative_id = registry[0]["representative_id"]
+    writer = ScriptedProviderAdapter("fake", ["m"], [
+        '{"wrong":0}', '{"wrong":1}', '{"wrong":2}',
+    ])
+    technician = ScriptedProviderAdapter("tech", ["t"], ['{"action":"SUPPORT"}'])
+    engine = MeetingEngine(
+        repo=repo, adapters={"fake": writer, "tech": technician},
+        notifier=CapturingNotifier(),
+    )
+    original = engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+
+    parsed = engine.validate_structured_response(
+        representative_id, response=original, schema_model=Action,
+        stage="draft", original_system_text="s", original_user_text="u",
+        fresh_attempts_remaining=1,
+    )
+
+    assert parsed.action == "SUPPORT"
+    assert len(writer._responses) == 0
+    assert len(technician._responses) == 0
+    assert "TECHNICIAN_SCHEMA_REPAIR_SUCCEEDED" in repo.events.path.read_text()
+    assert repo.events.verify()
+
+
+def test_technician_taskbook_repair_preserves_constraints_and_displaced_notes():
+    source = {
+        "action": "PROPOSE",
+        "taskbook": {
+            "hard_constraints": ["Do not change scope"],
+            "outline": {
+                "modules": [{"module_id": "RM-01", "cross_module_links": ["Only discuss limitations"]}],
+                "clustering_notes": [],
+            },
+        },
+    }
+    repaired = json.loads(json.dumps(source))
+    repaired["taskbook"]["outline"]["modules"][0]["cross_module_links"] = []
+    repaired["taskbook"]["outline"]["clustering_notes"] = [
+        "RM-01: Only discuss limitations",
+    ]
+    assert MeetingEngine._technician_semantics_preserved(
+        "FastPlanningTurn", json.dumps(source), repaired,
+    )
+    changed_scope = json.loads(json.dumps(repaired))
+    changed_scope["taskbook"]["hard_constraints"] = ["Scope may change"]
+    assert not MeetingEngine._technician_semantics_preserved(
+        "FastPlanningTurn", json.dumps(source), changed_scope,
+    )
+    missing_note = json.loads(json.dumps(repaired))
+    missing_note["taskbook"]["outline"]["clustering_notes"] = []
+    assert not MeetingEngine._technician_semantics_preserved(
+        "FastPlanningTurn", json.dumps(source), missing_note,
+    )
+
+
+def test_invalid_technician_repair_falls_back_to_fresh_original(tmp_path):
+    class Action(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        action: str
+
+    gov = tmp_path / "gov"
+    gov.mkdir()
+    (gov / "rule.md").write_text("rule")
+    repo = MeetingRepository.create(
+        tmp_path / "ws", selected_models=[("fake", "m")],
+        chair_model=("fake", "m"), governance_docs=gov,
+        task_description="task", technician_model=("tech", "t"),
+        technician_reasoning_effort=ReasoningEffort.DEFAULT,
+    )
+    registry = json.loads(
+        (repo.root / "identity_private/representative_registry.json").read_text()
+    )
+    representative_id = registry[0]["representative_id"]
+    writer = ScriptedProviderAdapter("fake", ["m"], [
+        '{"wrong":0}', '{"wrong":1}', '{"wrong":2}', '{"action":"RETRY"}',
+    ])
+    technician = ScriptedProviderAdapter("tech", ["t"], ['{"wrong":3}'])
+    engine = MeetingEngine(
+        repo=repo, adapters={"fake": writer, "tech": technician},
+        notifier=CapturingNotifier(),
+    )
+    original = engine.invoke_participant(
+        representative_id, system_text="s", user_text="u", stage="draft",
+    )
+
+    parsed = engine.validate_structured_response(
+        representative_id, response=original, schema_model=Action,
+        stage="draft", original_system_text="s", original_user_text="u",
+        fresh_attempts_remaining=1,
+    )
+
+    assert parsed.action == "RETRY"
+    assert "TECHNICIAN_SCHEMA_REPAIR_DECLINED" in repo.events.path.read_text()
+    assert len(list((repo.root / "governance_private/invalid_model_outputs").glob("*.json"))) == 4
 
 
 def test_engine_repairs_schema_once_without_changing_substantive_choice(tmp_path):

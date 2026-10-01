@@ -1,4 +1,4 @@
-# Project ENSEMBLE v0.7.1
+# Project ENSEMBLE v0.7.3
 
 [中文说明](README_v071.md) · [English guide](README_v071.en.md)
 
@@ -9,7 +9,8 @@ Please use the GitHub Issues bug or research-feedback templates with synthetic
 tasks, minimal reproduction steps, and redacted screenshots. Do not post real
 meeting directories, evidence packets, API keys, or private research material.
 
-This version coexists with v0.7.0 rather than upgrading its meetings in place.
+This v0.7.3 software release follows the v0.7.1 literature-writing governance
+policy and coexists with v0.7.0 rather than upgrading its meetings in place.
 It installs `ensemble`; the older version uses `ensemble-old`. Use separate
 virtual environments. Project code and documentation are released under the
 [MIT License](LICENSE). The bundled HarmonyOS Sans SC fonts retain their

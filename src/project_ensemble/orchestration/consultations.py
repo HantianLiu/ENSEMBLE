@@ -49,6 +49,7 @@ CONSULTATION_OPTION_LABELS = {
     "KEEP_APPROVED_SCOPE": "按已批准的范围继续，保留范围问题记录",
     "RETRY_WRITER_REVISION": "要求主笔再修订一次并复核",
     "RETRY_WRITER_LOCAL_REPAIR": "只针对当前异议局部修稿，再交科学复核",
+    "REWRITE_WHOLE_MODULE": "异议涉及全章结构；要求主笔重写整章后复核",
     "ACCEPT_WITH_DISCLOSED_LIMITATION": "知悉未解决的科学异议，附限制说明后继续",
     "REMOVE_UNSUPPORTED_SYNTHESIS": "去除未获认可的跨模块结论后出版",
     "USE_WRITER_DEFAULT": "此项由主笔采用合理默认值，并在任务书标明",

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from project_ensemble.domain import DeliverableType, MeetingType, ModelDescriptor, Persona, ReasoningEffort
 from project_ensemble.errors import (
     ModelReplacementRequested, OpenAlexDailyQuotaExhausted,
-    ProviderContentRejectedError, RepresentativeUnavailableError,
+    ProviderContentRejectedError, RepresentativeUnavailableError, TransientProviderError,
 )
 from project_ensemble.orchestration.consultations import HumanConsultationIssue, HumanConsultationService
 from project_ensemble.orchestration.engine import MeetingEngine
@@ -85,6 +85,53 @@ def test_fast_split_proposals_are_parallel_anonymous_and_replayable(tmp_path):
     assert len(calls) == 4
     runner._invoke_service = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must replay"))
     assert FastLiteratureRunner._parallel_split_proposals(runner, task) == result
+
+
+def test_fast_consultation_resume_reuses_frozen_resolution_before_reopening_issue(tmp_path):
+    gov = tmp_path / "gov"
+    gov.mkdir()
+    (gov / "rule.md").write_text("rule", encoding="utf-8")
+    repo = MeetingRepository.create(
+        tmp_path / "ws",
+        selected_models=[("fake", "model")],
+        chair_model=("fake", "model"),
+        governance_docs=gov,
+    )
+    service = HumanConsultationService(repo)
+    frozen = HumanConsultationIssue(
+        issue_id="HC-FAST-SCIENCE-RM-07",
+        meeting_id=repo.meeting_id,
+        reason_code="FAST_SCIENCE_REVIEW_HUMAN_REQUIRED",
+        stage="FAST_SCIENCE_REVIEW",
+        question="旧版本的科学异议决定",
+        options=["RETRY_WRITER_REVISION", "ACCEPT_WITH_DISCLOSED_LIMITATION"],
+        context={"recheck_path": "science_evidence_appeal_v2.json"},
+    )
+    service.open_issue(frozen)
+    recorded = service.resolve(
+        issue_id=frozen.issue_id,
+        decision="RETRY_WRITER_REVISION",
+        rationale="Human selected RETRY_WRITER_REVISION; no additional note.",
+        scope="THIS_CONSULTATION_ONLY",
+    )
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = repo
+    resumed = FastLiteratureRunner._consult(
+        runner,
+        frozen.issue_id,
+        "FAST_SCIENCE_REVIEW",
+        "更新后的上下文路径不应覆盖已经冻结的决定",
+        ["RETRY_WRITER_REVISION", "ACCEPT_WITH_DISCLOSED_LIMITATION"],
+        {"recheck_path": "science_evidence_appeal_v3.json"},
+    )
+
+    assert resumed == recorded
+    persisted_issue = HumanConsultationIssue.model_validate_json(
+        (repo.root / "human_private/consultations"
+         / f"{frozen.issue_id}.issue.json").read_text(encoding="utf-8")
+    )
+    assert persisted_issue == frozen
 
 
 def test_fast_writer_receives_anonymous_proposals_but_retains_own_taskbook_authority(
@@ -241,17 +288,48 @@ def test_fast_menu_uses_writer_and_two_reviewers_without_chair(monkeypatch, tmp_
         ],
     )
     answers = iter([
-            "1", "1", "1", "1,2", "1", "1", "1", "1,2", "2", "1", "", "",
+            "1", "1", "1", "1,2", "1", "1", "1", "1", "1,2", "2", "1", "", "",
             "初步研究目标", "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+            input_fn=lambda prompt: (
+                "" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次"))
+                else next(answers)
+            ), output=io.StringIO()
     ).collect(config(tmp_path))
     assert selection.literature_writing_policy == "fast"
     assert selection.chair_model is None
     assert len(selection.models) == 2
     assert selection.writer_model == ("fake", "writer")
     assert selection.fast_planner_models == (("fake", "writer"), ("fake", "reviewer"))
+
+
+def test_fast_menu_can_skip_parallel_split_proposals(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "project_ensemble.startup.discover_models",
+        lambda cfg, providers: [
+            ModelDescriptor(provider_id="fake", model_id="writer"),
+            ModelDescriptor(provider_id="fake", model_id="reviewer"),
+        ],
+    )
+    answers = iter([
+        "1", "1", "1", "1,2", "1", "1", "1", "2", "1", "1", "", "",
+        "初步研究目标", "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
+    ])
+    selection = TerminalWizard(
+        input_fn=lambda prompt: (
+            "" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次"))
+            else next(answers)
+        ), output=io.StringIO()
+    ).collect(config(tmp_path))
+    assert selection.literature_writing_policy == "fast"
+    assert selection.fast_planner_models == ()
+
+
+def test_fast_split_proposals_return_empty_when_skipped():
+    runner = FastLiteratureRunner.__new__(FastLiteratureRunner)
+    runner.manifest = {"fast_planner_models": []}
+    assert runner._parallel_split_proposals({"task": "test"}) == []
 
 
 def test_fast_selection_requires_distinct_reviewers_and_no_chair(tmp_path):
@@ -345,6 +423,10 @@ def test_fast_structured_turns_keep_question_and_taskbook_separate():
     with pytest.raises(ValidationError):
         FastQueryBatch(finished=False, claims=[], reason_to_continue_or_stop="缺证据")
     assert FastQueryBatch(finished=True, reason_to_continue_or_stop="证据足够").claims == []
+    assert FastQueryBatch(
+        finished=True, claims=["核查最后一个证据缺口"],
+        reason_to_continue_or_stop="查完这一批即结束",
+    ).claims == ["核查最后一个证据缺口"]
     assert FastQueryBatch(
         finished=False, glossary_claims=["关键术语的定义是否有原始来源？"],
         reason_to_continue_or_stop="需查证定义",
@@ -561,13 +643,14 @@ def test_fast_scope_questions_are_answered_one_by_one_and_resume(tmp_path):
         json.dumps({"decision": "KEEP", "rationale": "原范围足够", "new_scope": None}),
     )
     suggestion_out = io.StringIO()
-    suggestion_answers = iter(["5", "1"])
+    suggestion_answers = iter(["2", "1"])
     assert prompt_fast_scope_consultation(
         repo, suggested_issue, input_fn=lambda _: next(suggestion_answers),
         output=suggestion_out,
     )
     assert read_scope_decisions(repo, suggested_issue.issue_id, 1)[0]["decision"] == "KEEP"
-    assert "直接采纳主笔建议" in suggestion_out.getvalue()
+    assert "主笔解释（建议维持；非裁定）" in suggestion_out.getvalue()
+    assert "5. 直接采纳" not in suggestion_out.getvalue()
 
     plan = FastModulePlan.model_validate({
         "module_id": "RM-01", "core_problem": "如何定义界面", "boundary": "仅平直界面",
@@ -605,10 +688,13 @@ def test_fast_scope_questions_are_answered_one_by_one_and_resume(tmp_path):
         schema_model.model_validate_json(response.text),
     )
     delegated_answers = iter(["3", "1"])
+    delegated_out = io.StringIO()
     assert prompt_fast_scope_consultation(
-        repo, delegated_issue, input_fn=lambda _: next(delegated_answers), output=io.StringIO(),
+        repo, delegated_issue, input_fn=lambda _: next(delegated_answers), output=delegated_out,
         engine=delegated_engine,
     )
+    assert "正在取得学术主笔对本条的非约束建议" in delegated_out.getvalue()
+    assert "右栏是主笔的非约束解释或提案" in delegated_out.getvalue()
     assert calls == [("WRITER", "fast_scope_advice_item_01")]
     assert read_scope_decisions(repo, delegated_issue.issue_id, 1)[0]["authority"] == (
         "HUMAN_DELEGATED_TO_WRITER"
@@ -987,6 +1073,127 @@ def test_ctrl_r_opens_menu_before_parallel_research_batch_finishes(tmp_path):
     assert menu_seen.is_set()
     assert all((tmp_path / f"public/literature_report/fast/RM-01/research_round_1_{index:02d}.json").is_file()
                for index in (1, 2))
+
+
+def test_fast_final_query_batch_still_researches_its_claims(tmp_path):
+    class Docs:
+        def write_once(self, relative, content):
+            path = tmp_path / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            assert not path.exists()
+            path.write_text(content, encoding="utf-8")
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(root=tmp_path, docs=Docs())
+    runner.engine = SimpleNamespace(status=SimpleNamespace(phase=None), progress=NullProgressReporter())
+    runner.research_max_concurrent_claim_groups = 1
+    taskbook = FastTaskbook.model_validate({
+        "global_evidence_requirements": ["原文"], "completion_standard": "回答问题",
+        "outline": {"report_title": "任务", "scope_note": "范围", "modules": [
+            {"module_id": "RM-01", "title": "核心问题", "research_questions": ["问题"],
+             "required_evidence": ["原文"], "source_submission_refs": ["WRITER"]},
+        ]},
+    })
+    calls = []
+
+    def final_batch(_book, module, _plan, round_number, _prior):
+        calls.append(round_number)
+        batch = FastQueryBatch(
+            finished=True, claims=["最后一项命题"],
+            reason_to_continue_or_stop="本批之后不再查询",
+        )
+        runner.repo.docs.write_once(
+            runner._fast_root() / module.module_id / f"query_round_{round_number}.json",
+            batch.model_dump_json(),
+        )
+        return batch
+
+    def research(module, round_number, index, claim):
+        result = {"claim": claim, "status": "UNRESOLVED", "packet_id": None}
+        runner.repo.docs.write_once(
+            runner._fast_root() / module.module_id / f"research_round_{round_number}_{index:02d}.json",
+            json.dumps(result),
+        )
+        return result
+
+    runner._research_round = final_batch
+    runner._research_claim = research
+    runner._ensure_module_dossier = lambda module, coverage, _followups: coverage
+    runner._research_all_modules(taskbook, {"RM-01": None})
+    assert calls == [1]
+    coverage = json.loads((tmp_path / runner._fast_root() / "RM-01/coverage.json").read_text())
+    assert [item["claim"] for item in coverage["outcomes"]] == ["最后一项命题"]
+
+
+def test_fast_openalex_500_uses_one_audited_technician_query_repair(tmp_path):
+    class Docs:
+        def write_once(self, relative, content):
+            path = tmp_path / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            assert not path.exists()
+            path.write_text(content, encoding="utf-8")
+
+    manifest = tmp_path / "identity_private/meeting_manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"technician_model": ["fake", "coding-model"]}))
+    events = []
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, docs=Docs(), meeting_id="LR-TEST",
+        events=SimpleNamespace(append=lambda *args, **kwargs: events.append(args[0])),
+    )
+    progress = NullProgressReporter()
+    runner.engine = SimpleNamespace(progress=progress)
+    original = NormalizedClaim.model_validate({
+        "is_researchable": True, "normalized_claim": "Shannon defined conditional entropy",
+        "verification_question": "What did Shannon define?",
+        "supporting_query": "long Boolean supporting query",
+        "contradictory_query": "long Boolean contradictory query",
+        "limitations_query": "long Boolean limitations query",
+        "alternatives_query": "long Boolean alternatives query",
+        "scope_terms": ["conditional entropy"], "source_domain": "ACADEMIC",
+        "source_domain_rationale": "Original academic definition",
+        "freshness_class": "STABLE", "freshness_rationale": "Historical source",
+    })
+    model_calls = []
+
+    def invoke(participant_id, *, stage, schema, system, user):
+        model_calls.append(participant_id)
+        assert participant_id == "TECHNICIAN" and schema is FastSearchQueries
+        assert user["claim"] == "原始命题"
+        return FastSearchQueries(
+            supporting_query="Shannon conditional entropy",
+            contradictory_query="Shannon entropy logarithm base",
+            limitations_query="conditional entropy discrete variables",
+            alternatives_query="entropy chain rule information theory",
+        )
+
+    class Retriever:
+        backend_ids = ("openalex",)
+        calls = []
+
+        def retrieve(self, claim):
+            self.calls.append(claim.supporting_query)
+            if claim.supporting_query == original.supporting_query:
+                raise TransientProviderError("OpenAlex retrieval failed: HTTP 500")
+            return ResearchRetrievalResult([], [{"query": claim.supporting_query}], ("openalex",))
+
+    retriever = Retriever()
+    runner._invoke_service = invoke
+    runner.research_desk = SimpleNamespace(
+        retriever=retriever, retrieval_max_retries=0,
+        retrieval_retry_base_delay_seconds=0,
+    )
+    result = runner._fast_retrieve_claim(SimpleNamespace(module_id="RM-07"), 1, 6,
+                                         "原始命题", original)
+    assert result.effective_backend_ids == ("openalex",)
+    assert retriever.calls == [original.supporting_query, "Shannon conditional entropy"]
+    assert model_calls == ["TECHNICIAN"]
+    saved = json.loads((tmp_path / "audit_private/research/fast_stages/"
+                        "FAST-RM-07-1-06-retrieval.json").read_text())
+    assert saved["normalized_claim"] == original.model_dump(mode="json")
+    assert saved["technician_search_repair_path"]
+    assert "TECHNICIAN_SEARCH_REPAIR_RECORDED" in events
 
 
 def test_research_fallback_scopes_do_not_replace_other_parallel_requests(tmp_path):
@@ -1624,7 +1831,10 @@ def test_fast_local_science_repair_changes_only_exact_selected_passages(tmp_path
         root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
         events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
     )
-    runner.engine = SimpleNamespace(progress=NullProgressReporter())
+    runner.engine = SimpleNamespace(
+        progress=NullProgressReporter(), status=SimpleNamespace(phase=None),
+    )
+    runner._v071_progress = (1, 1)
     runner._validate_citations = lambda packet_ids: None
     module = OutlineModule(
         module_id="RM-05", title="Regulation", research_questions=["What is supported?"],
@@ -1654,3 +1864,244 @@ def test_fast_local_science_repair_changes_only_exact_selected_passages(tmp_path
     assert original.draft.body_markdown == "A 2021 report proves approval [C5-1].\n\nUnaffected paragraph."
     assert draft_path.is_file()
     assert runner._local_science_repair(module, 4, original, recheck)[1] == repaired
+
+
+def test_fast_local_science_repair_can_add_a_new_glossary_entry(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    runner.engine = SimpleNamespace(
+        progress=NullProgressReporter(), status=SimpleNamespace(phase=None),
+    )
+    runner._v071_progress = (1, 1)
+    runner._validate_citations = lambda packet_ids: None
+    module = OutlineModule(
+        module_id="RM-05", title="Interface scaling", research_questions=["What is supported?"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+    catalog = (tmp_path / "public/literature_report/modules/RM-05/research/"
+               "chapter_citation_catalog.json")
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"sources": [{"citation_id": "C5-1", "packet_ids": ["RP-1"]}]}))
+    recheck = tmp_path / "public/literature_report/fast/RM-05/science_recheck_v3.json"
+    recheck.parent.mkdir(parents=True)
+    recheck.write_text(json.dumps({"votes": [{"remaining_material_problems": [
+        "术语表修订意见：补入‘亚临界大体系窗口’的定义。",
+    ]}]}))
+    original = WriterChapter(draft=ModuleDraft(
+        title="Interface scaling",
+        body_markdown="该分析关注亚临界大体系窗口中的界面涨落。",
+        short_summary="比较尺度效应。",
+    ))
+    runner._invoke_service = lambda *_args, **_kwargs: FastLocalScienceRepair(
+        glossary_additions=[{
+            "entry": {
+                "term": "亚临界大体系窗口",
+                "explanation_mode": "NATURAL_LANGUAGE",
+                "explanation": "温度低于临界点且体系足够大、可容纳一维界面的模拟条件。",
+                "source_citation_ids": ["C5-1"],
+            },
+            "objection_numbers": [1],
+        }],
+    )
+
+    draft_path, repaired = runner._local_science_repair(module, 4, original, recheck)
+
+    assert repaired.draft.body_markdown == original.draft.body_markdown
+    assert len(repaired.glossary_additions) == 1
+    assert repaired.glossary_additions[0].term == "亚临界大体系窗口"
+    assert repaired.glossary_additions[0].source_citation_ids == ["C5-1"]
+    assert draft_path.is_file()
+
+
+def test_fast_local_science_repair_uses_paragraph_numbers_for_duplicate_text_and_fresh_cycle(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    runner.engine = SimpleNamespace(
+        progress=NullProgressReporter(), status=SimpleNamespace(phase=None),
+    )
+    runner._v071_progress = (1, 1)
+    runner._validate_citations = lambda packet_ids: None
+    module = OutlineModule(
+        module_id="RM-08", title="Interface scaling", research_questions=["What is supported?"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+    catalog = (tmp_path / "public/literature_report/modules/RM-08/research/"
+               "chapter_citation_catalog.json")
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"sources": []}))
+    recheck = tmp_path / "public/literature_report/fast/RM-08/science_recheck_v2.json"
+    recheck.parent.mkdir(parents=True)
+    recheck.write_text(json.dumps({"votes": [{"remaining_material_problems": [
+        "The second repeated paragraph needs correction.",
+    ]}]}))
+    original = WriterChapter(draft=ModuleDraft(
+        title="Interface scaling",
+        body_markdown="Shared sentence.\n\nShared sentence.",
+        short_summary="Two paragraphs repeat the same sentence.",
+    ))
+    previous_attempt = tmp_path / "public/literature_report/modules/RM-08/writing_v071/"
+    previous_attempt.mkdir(parents=True)
+    (previous_attempt / "writer_v3_local_patch_c03_a03.json").write_text("{}")
+    called_stages = []
+
+    def invoke(_participant_id, *, stage, **_kwargs):
+        called_stages.append(stage)
+        return FastLocalScienceRepair(edits=[{
+            "paragraph_number": 2,
+            "new_text": "The second paragraph now states the qualified result.",
+            "objection_numbers": [1],
+        }])
+
+    runner._invoke_service = invoke
+    _draft_path, repaired = runner._local_science_repair(module, 3, original, recheck)
+
+    assert repaired.draft.body_markdown == (
+        "Shared sentence.\n\nThe second paragraph now states the qualified result."
+    )
+    assert called_stages == ["fast_local_science_repair_RM-08_v3_c4_a1"]
+
+
+def test_fast_local_science_repair_can_edit_a_glossary_entry_by_term(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    runner.engine = SimpleNamespace(
+        progress=NullProgressReporter(), status=SimpleNamespace(phase=None),
+    )
+    runner._v071_progress = (1, 1)
+    runner._validate_citations = lambda packet_ids: None
+    module = OutlineModule(
+        module_id="RM-08", title="Interface scaling", research_questions=["What is supported?"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+    catalog = (tmp_path / "public/literature_report/modules/RM-08/research/"
+               "chapter_citation_catalog.json")
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"sources": []}))
+    recheck = tmp_path / "public/literature_report/fast/RM-08/science_recheck_v2.json"
+    recheck.parent.mkdir(parents=True)
+    recheck.write_text(json.dumps({"votes": [{"remaining_material_problems": [
+        "Clarify the Gibbs dividing line term in the glossary.",
+    ]}]}))
+    original = WriterChapter(
+        draft=ModuleDraft(
+            title="Interface scaling", body_markdown="The line is defined locally.",
+            short_summary="Definitions are compared.",
+        ),
+        glossary_additions=[{
+            "term": "Gibbs dividing line",
+            "explanation_mode": "NATURAL_LANGUAGE",
+            "explanation": "An interface convention.",
+        }],
+    )
+    runner._invoke_service = lambda *_args, **_kwargs: FastLocalScienceRepair(
+        glossary_edits=[{
+            "term": "Gibbs dividing line",
+            "field": "explanation",
+            "new_text": "A chosen line used to divide the two coexisting phases; its position is conventional.",
+            "objection_numbers": [1],
+        }],
+    )
+
+    _draft_path, repaired = runner._local_science_repair(module, 3, original, recheck)
+
+    assert repaired.glossary_additions[0].explanation.startswith("A chosen line")
+
+
+def test_fast_local_science_repair_hides_legacy_packet_ids_and_rebuilds_citations(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    runner.engine = SimpleNamespace(
+        progress=NullProgressReporter(), status=SimpleNamespace(phase=None),
+    )
+    runner._v071_progress = (1, 1)
+    runner._validate_citations = lambda _packet_ids: None
+    module = OutlineModule(
+        module_id="RM-08", title="Interface scaling", research_questions=["What is supported?"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+    catalog = (tmp_path / "public/literature_report/modules/RM-08/research/"
+               "chapter_citation_catalog.json")
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"sources": [{
+        "citation_id": "C8-1", "packet_ids": ["RP-OLD"],
+        "title": "A source title", "authors": ["A. Author"],
+        "publication_year": 1991, "doi": "10.1000/example",
+    }]}), encoding="utf-8")
+    recheck = tmp_path / "public/literature_report/fast/RM-08/science_recheck_v2.json"
+    recheck.parent.mkdir(parents=True)
+    recheck.write_text(json.dumps({"votes": [{"remaining_material_problems": [
+        "Replace [RP-OLD] with the reader-facing citation for the 1991 source.",
+    ]}]}), encoding="utf-8")
+    original = WriterChapter(draft=ModuleDraft(
+        title="Interface scaling",
+        body_markdown="The 1991 study reports the result [RP-OLD].",
+        short_summary="The result is reported in [RP-OLD].",
+        cited_packet_ids=["RP-OLD"],
+    ))
+    captured_users = []
+
+    def invoke(_participant_id, *, user, **_kwargs):
+        captured_users.append(user)
+        return FastLocalScienceRepair(edits=[
+            {
+                "paragraph_number": 1,
+                "new_text": "The 1991 study reports the result [C8-1].",
+                "objection_numbers": [1],
+            },
+            {
+                "target_field": "short_summary", "replace_entire_field": True,
+                "new_text": "The 1991 study reports the result [C8-1].",
+                "objection_numbers": [1],
+            },
+        ])
+
+    runner._invoke_service = invoke
+    _draft_path, repaired = runner._local_science_repair(module, 3, original, recheck)
+
+    prompt_payload = json.dumps(captured_users[0], ensure_ascii=False)
+    assert "RP-OLD" not in prompt_payload
+    assert "[来源待核]" in prompt_payload
+    assert "[C8-1]" in repaired.draft.body_markdown
+    assert "[C8-1]" in repaired.draft.short_summary
+    assert repaired.draft.cited_packet_ids == ["RP-OLD"]
+
+
+def test_fast_local_science_objections_can_be_built_from_first_review(tmp_path):
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(root=tmp_path)
+    review = tmp_path / "public/literature_report/fast/RM-01/science_review_v1.json"
+    review.parent.mkdir(parents=True)
+    review.write_text(json.dumps({"reviews": [{"checklist": {
+        "issues": [{
+            "location_excerpt": "Claim under review.",
+            "questioned_claim": "The claim is too strong.",
+            "why_it_matters": "The source supports only an association.",
+            "suggested_response": "Qualify the wording.",
+        }],
+        "glossary_corrections": ["Clarify the specialized term."],
+    }}]}), encoding="utf-8")
+    objections = runner._local_science_objections(review)
+    assert len(objections) == 2
+    assert "Claim under review." in objections[0]
+    assert "supports only an association" in objections[0]
+    assert objections[1] == "术语表修订意见：Clarify the specialized term."

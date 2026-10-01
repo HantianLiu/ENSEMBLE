@@ -96,6 +96,12 @@ class ModelReplacementRequested(EnsembleError):
 
     pass
 
+
+class ForcedModelReplacementRequested(ModelReplacementRequested):
+    """The Human abandoned an unfinished provider response to switch models."""
+
+    pass
+
 class EventChainError(EnsembleError):
     pass
 

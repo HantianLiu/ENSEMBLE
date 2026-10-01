@@ -98,11 +98,45 @@ def has_runtime_replacement(repo: MeetingRepository, participant_id: str) -> boo
     return bool(_replacement_records(repo, participant_id))
 
 
+def latest_runtime_replacement_at_ns(repo: MeetingRepository, participant_id: str) -> int:
+    """Old exchanges cannot satisfy a request made after a model replacement.
+
+    This is a time boundary rather than a model-name check: an explicitly
+    configured, one-shot fallback may legitimately answer under another model.
+    """
+
+    records = _replacement_records(repo, participant_id)
+    if not records:
+        return 0
+    try:
+        created = datetime.fromisoformat(records[-1]["created_at"])
+        return int(created.timestamp()) * 1_000_000_000 + created.microsecond * 1_000
+    except (KeyError, TypeError, ValueError):
+        return 0
+
+
 def replacement_model_pairs(repo: MeetingRepository) -> set[tuple[str, str]]:
     return {
         (str(record["to_provider_id"]), str(record["to_model_id"]))
         for record in _replacement_records(repo)
     }
+
+
+def active_replacement_model_pairs(repo: MeetingRepository) -> set[tuple[str, str]]:
+    """Return only replacement runtimes that participants currently use.
+
+    Replacement records are an append-only audit trail.  Older targets remain
+    useful for explaining history, but must not be treated as live models when
+    preparing a resumed run (a participant may have moved through several
+    providers since then).
+    """
+
+    participant_ids = {
+        str(record["participant_id"])
+        for record in _replacement_records(repo)
+        if record.get("participant_id")
+    }
+    return {current_runtime_for(repo, participant_id) for participant_id in participant_ids}
 
 
 def meeting_participant_ids(repo: MeetingRepository) -> list[str]:

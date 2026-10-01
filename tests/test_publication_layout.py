@@ -178,6 +178,29 @@ def test_academic_html_has_navigation_reader_drawer_and_math():
     assert 'id="annotation-highlight"' in rendered
     assert 'id="annotation-create"' in rendered
     assert 'id="annotation-panel"' in rendered
+
+
+def test_academic_html_citation_cards_link_to_source_and_pdf_safely():
+    source = (
+        "# Report\n\n## 1. Findings\n\nClaim [1].\n\n"
+        "## References\n\n[1] Example article. https://doi.org/10.1234/example.\n"
+    )
+    rendered = render_academic_review_html(
+        source,
+        meeting_id="LR-TEST",
+        reference_links={
+            "1": {
+                "source": "https://doi.org/10.1234/example",
+                "pdf": "https://publisher.example/article.pdf",
+            },
+            "2": {"source": "javascript:alert(1)"},
+        },
+    )
+    assert '"referenceLinks": {"1": {"source": "https://doi.org/10.1234/example", "pdf": "https://publisher.example/article.pdf"}}' in rendered
+    assert "打开原文 PDF ↗" in rendered
+    assert "打开来源网页 ↗" in rendered
+    assert "javascript:alert(1)" not in rendered
+    assert "noopener noreferrer" in rendered
     assert 'id="selection-menu"' in rendered
     assert '<summary>我的高亮、批注与问答</summary>' in rendered
     assert "const inReadingOrder = [...records].sort(" in rendered
@@ -366,6 +389,24 @@ def test_academic_html_emphasizes_module_headings_abstract_and_bold():
     assert '<strong>关键判断</strong>' in rendered
     assert '<strong>重要条件</strong>' in rendered
     assert 'article strong, article b' in rendered
+
+
+def test_academic_html_numbers_nested_sections_and_styles_deep_headings_readably():
+    source = (
+        "# 报告标题\n\n## 分模块调研结果\n\n"
+        "### 5. 粗粒化与重整化群\n\n"
+        "#### 第一层小节\n\n##### 本章要回答的问题，以及两个必须先固定的术语\n\n"
+        "正文。\n\n#### 第二层小节\n\n正文。\n"
+    )
+    rendered = render_academic_review_html(source, meeting_id="LR-TEST")
+    article = rendered.split("<main><article>", 1)[1].split("</article>", 1)[0]
+
+    assert "<h3 id=\"section-3\" class=\"module-heading\">5. 粗粒化与重整化群</h3>" in article
+    assert "<h4 id=\"section-4\">5.1 第一层小节</h4>" in article
+    assert "<h5 id=\"section-5\">5.1.1 本章要回答的问题，以及两个必须先固定的术语</h5>" in article
+    assert "<h4 id=\"section-6\">5.2 第二层小节</h4>" in article
+    assert "h5 { margin-top:1.55em; font-size:1.16rem; }" in rendered
+    assert "h6 { margin-top:1.4em; font-size:1.05rem; }" in rendered
 
 
 def test_academic_html_recognizes_bold_sentence_adjacent_to_chinese_prose():

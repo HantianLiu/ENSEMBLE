@@ -281,17 +281,22 @@ def test_report_planning_uses_four_personas_and_full_review(tmp_path):
         for path in (derived.root / "governance_private/provider_exchanges").glob("X-*.json")
     ]
     decomposition_prompts = [
-        item["request"]["system_text"]
+        item["request"]["system_text"] + item["request"]["user_text"]
         for item in exchanges if item["stage"] == "research_decomposition"
     ]
     assert decomposition_prompts
     assert all("出处尚不确定时标为“待核查”" in text for text in decomposition_prompts)
+    assert all("结构化结果的自由文本表达规则" in text for text in decomposition_prompts)
+    assert all("规划权限边界" in text for text in decomposition_prompts)
+    assert all("不得决定联网能力" in text for text in decomposition_prompts)
     chair_clustering_prompts = [
         item["request"]["system_text"]
         for item in exchanges if item["stage"] == "chair_research_outline_clustering"
     ]
     assert chair_clustering_prompts
     assert all("不阻断流程的提醒" in text for text in chair_clustering_prompts)
+    assert all("结构化结果的自由文本表达规则" in text for text in chair_clustering_prompts)
+    assert all("规划权限边界" in text for text in chair_clustering_prompts)
     derived.docs.write_once(
         "public/literature_report/audience_profile-C001.json",
         json.dumps({

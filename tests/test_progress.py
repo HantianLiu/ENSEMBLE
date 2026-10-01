@@ -3,12 +3,13 @@ import json
 import os
 import sys
 import termios
+import threading
 import time
 
 import pytest
 
 from project_ensemble.domain import MeetingPhase
-from project_ensemble.errors import ModelReplacementRequested
+from project_ensemble.errors import ForcedModelReplacementRequested, ModelReplacementRequested
 from project_ensemble.runtime.progress import ConsoleProgressReporter, TaskProgressItem
 from project_ensemble.runtime.progress import _display_width
 from project_ensemble.runtime.telemetry import TokenTelemetry
@@ -799,3 +800,110 @@ def test_ctrl_r_restores_terminal_before_model_replacement_menu(monkeypatch):
         tty_input.close()
         os.close(master_fd)
         os.close(slave_fd)
+
+
+def test_ctrl_p_forces_unfinished_call_and_restores_terminal(monkeypatch):
+    master_fd, slave_fd = os.openpty()
+    tty_input = os.fdopen(os.dup(slave_fd), "r", encoding="utf-8", buffering=1)
+    original = termios.tcgetattr(tty_input.fileno())
+    monkeypatch.setattr(sys, "stdin", tty_input)
+    progress = ConsoleProgressReporter(io.StringIO(), color=False, live=True)
+    try:
+        progress.start_control_listener()
+        os.write(master_fd, b"\x10")
+        deadline = time.monotonic() + 1.0
+        while not progress._force_control_requested.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert progress._force_control_requested.is_set()
+        with pytest.raises(ForcedModelReplacementRequested):
+            progress.raise_if_force_control_requested()
+        restored = termios.tcgetattr(tty_input.fileno())
+        assert progress._control_thread is None
+        assert restored[3] & termios.ICANON == original[3] & termios.ICANON
+    finally:
+        progress.shutdown_control_listener()
+        tty_input.close()
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
+def test_ctrl_r_opens_menu_while_a_model_call_remains_in_flight(monkeypatch):
+    master_fd, slave_fd = os.openpty()
+    tty_input = os.fdopen(os.dup(slave_fd), "r", encoding="utf-8", buffering=1)
+    original = termios.tcgetattr(tty_input.fileno())
+    monkeypatch.setattr(sys, "stdin", tty_input)
+    progress = ConsoleProgressReporter(io.StringIO(), color=False, live=True)
+    menu_open = threading.Event()
+    close_menu = threading.Event()
+    progress.immediate_control_callback = lambda: (menu_open.set(), close_menu.wait(2.0))
+    try:
+        progress.start_control_listener()
+        os.write(master_fd, b"\x12")
+        assert menu_open.wait(1.0), "the menu must not wait for a model-call boundary"
+        assert not progress._force_control_requested.is_set()
+        assert not progress.control_request_pending()
+        close_menu.set()
+        deadline = time.monotonic() + 1.0
+        while progress._menu_active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not progress._menu_active
+        # The original caller still owns the reader after the background menu
+        # closes; its ordinary stop must release stdin, not leave a hotkey
+        # listener behind during the next Human prompt.
+        progress.stop_control_listener()
+        assert progress._control_users == 0
+        assert progress._control_thread is None
+    finally:
+        close_menu.set()
+        progress.shutdown_control_listener()
+        assert termios.tcgetattr(tty_input.fileno())[3] & termios.ECHO == original[3] & termios.ECHO
+        tty_input.close()
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
+def test_repeated_ctrl_r_never_forces_a_running_call(monkeypatch):
+    master_fd, slave_fd = os.openpty()
+    tty_input = os.fdopen(os.dup(slave_fd), "r", encoding="utf-8", buffering=1)
+    monkeypatch.setattr(sys, "stdin", tty_input)
+    progress = ConsoleProgressReporter(io.StringIO(), color=False, live=True)
+    try:
+        progress.start_control_listener()
+        os.write(master_fd, b"\x12\x12")
+        deadline = time.monotonic() + 1.0
+        while not progress._control_requested.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert progress._control_requested.is_set()
+        assert not progress._force_control_requested.is_set()
+    finally:
+        progress.shutdown_control_listener()
+        tty_input.close()
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
+def test_background_model_menu_does_not_compete_with_human_consultation():
+    progress = ConsoleProgressReporter(io.StringIO(), color=False, live=False)
+    menu_entered = threading.Event()
+    close_menu = threading.Event()
+    consultation_entered = threading.Event()
+
+    def model_menu():
+        with progress.interactive_menu():
+            menu_entered.set()
+            assert close_menu.wait(2.0)
+
+    def consultation():
+        with progress.consultation_display():
+            consultation_entered.set()
+
+    menu_thread = threading.Thread(target=model_menu)
+    consultation_thread = threading.Thread(target=consultation)
+    menu_thread.start()
+    assert menu_entered.wait(1.0)
+    consultation_thread.start()
+    assert not consultation_entered.wait(0.1)
+    close_menu.set()
+    menu_thread.join(1.0)
+    consultation_thread.join(1.0)
+    assert consultation_entered.is_set()

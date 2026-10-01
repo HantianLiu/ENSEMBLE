@@ -19,6 +19,7 @@ from project_ensemble.user_settings import (
     add_provider, appearance, configure_interactively, ensure_user_config,
     save_appearance, save_freshness_preset, settings_dir, store_secret,
     save_search_backends, interface_language, save_interface_language,
+    update_provider, remove_provider, replace_managed_secret, removed_provider_ids,
 )
 
 
@@ -56,6 +57,54 @@ def test_secret_file_and_environment_override(isolated_settings, monkeypatch):
     assert provider.api_key() == "abc 'quoted' value"
     monkeypatch.setenv("LAB_API_KEY", "from-global-environment")
     assert provider.api_key() == "from-global-environment"
+
+
+def test_provider_management_updates_and_removes_catalog_entries(isolated_settings):
+    provider = ProviderConfig(
+        kind="openai_compatible", display_name="LithosAI",
+        base_url="https://api.lithosai.cloud/v1", api_key_env="LITHOSAI_API_KEY",
+    )
+    add_provider("lithos", provider)
+    updated = provider.model_copy(update={
+        "display_name": "Lithos",
+        "base_url": "https://api.example.test/v1",
+    })
+    config_path = update_provider("lithos", updated)
+    saved = load_config(config_path).providers["lithos"]
+    assert saved.display_name == "Lithos"
+    assert saved.base_url == "https://api.example.test/v1"
+
+    remove_provider("lithos")
+    assert "lithos" not in load_config(config_path).providers
+    assert "lithos" in removed_provider_ids()
+
+
+def test_provider_settings_menu_can_rename_existing_provider(isolated_settings):
+    add_provider("lithos", ProviderConfig(
+        kind="openai_compatible", display_name="LithosAI",
+        base_url="https://api.lithosai.cloud/v1", api_key_env="LITHOSAI_API_KEY",
+    ))
+    choices = iter(["provider", "manage", "lithos", "rename"])
+    answers = iter(["Lithos Production"])
+    wizard = SimpleNamespace(
+        output=io.StringIO(), language="en",
+        _choose_one=lambda _title, _options: next(choices),
+        input=lambda _prompt: next(answers),
+    )
+
+    path = configure_interactively(wizard)
+
+    assert load_config(path).providers["lithos"].display_name == "Lithos Production"
+
+
+def test_provider_key_can_be_rotated_in_user_secret_store(isolated_settings):
+    path = replace_managed_secret("lithos", "ENSEMBLE_LITHOS_MANAGED_KEY", "first-key")
+    replace_managed_secret("lithos", "ENSEMBLE_LITHOS_MANAGED_KEY", "rotated-key")
+    provider = ProviderConfig(
+        kind="openai_compatible", base_url="https://example.test/v1",
+        api_key_env="ENSEMBLE_LITHOS_MANAGED_KEY", api_key_file=str(path),
+    )
+    assert provider.api_key() == "rotated-key"
 
 
 def test_appearance_and_freshness_are_user_scoped(isolated_settings, monkeypatch):
@@ -126,7 +175,7 @@ def test_anonymous_openalex_does_not_inherit_existing_global_key(isolated_settin
 def test_wizard_can_reference_external_key_without_copying_it(isolated_settings, tmp_path):
     external = tmp_path / "external.sh"
     external.write_text("REMOTE_API_KEY='external-secret'\n", encoding="utf-8")
-    options = iter(["provider", "openai_compatible", "file"])
+    options = iter(["provider", "add", "openai_compatible", "file"])
     answers = iter(["实验网关", "lab", "https://gateway.example/v1", "REMOTE_API_KEY", str(external)])
     wizard = SimpleNamespace(
         output=io.StringIO(), _choose_one=lambda _title, _options: next(options),
@@ -140,6 +189,24 @@ def test_wizard_can_reference_external_key_without_copying_it(isolated_settings,
     assert not (settings_dir() / "secrets/lab.sh").exists()
 
 
+def test_wizard_adds_lithosai_preset_without_manual_toml(isolated_settings, monkeypatch):
+    monkeypatch.setenv("LITHOSAI_API_KEY", "test-key")
+    choices = iter(["provider", "add", "lithosai", "env"])
+    wizard = SimpleNamespace(
+        output=io.StringIO(),
+        _choose_one=lambda _title, _options: next(choices),
+    )
+
+    path = configure_interactively(wizard)
+    provider = load_config(path).providers["lithos"]
+
+    assert provider.kind == "openai_compatible"
+    assert provider.display_name == "LithosAI"
+    assert provider.base_url == "https://api.lithosai.cloud/v1"
+    assert provider.api_key_env == "LITHOSAI_API_KEY"
+    assert provider.api_key() == "test-key"
+
+
 def test_claude_code_requires_explicit_model_list():
     with pytest.raises(ValueError, match="selectable_models"):
         ProviderConfig(kind="claude_code")
@@ -151,17 +218,27 @@ def test_claude_code_is_tool_free_and_does_not_put_prompt_or_key_in_argv(monkeyp
     seen = {}
     monkeypatch.setattr("project_ensemble.providers.claude_code.shutil.which", lambda command: "/bin/claude")
 
-    def fake_run(argv, **kwargs):
-        seen.update(argv=argv, kwargs=kwargs)
-        assert Path(kwargs["cwd"]).is_dir()
-        assert Path(argv[argv.index("--system-prompt-file") + 1]).read_text() == "private rules"
-        return SimpleNamespace(returncode=0, stdout='{"result":"answer","usage":{"input_tokens":9,"output_tokens":2}}', stderr="")
+    class FakeProcess:
+        returncode = None
 
-    monkeypatch.setattr("project_ensemble.providers.claude_code.subprocess.run", fake_run)
+        def __init__(self, argv, **kwargs):
+            seen.update(argv=argv, kwargs=kwargs)
+            assert Path(kwargs["cwd"]).is_dir()
+            assert Path(argv[argv.index("--system-prompt-file") + 1]).read_text() == "private rules"
+
+        def communicate(self, input=None, timeout=None):
+            seen["input"] = input
+            self.returncode = 0
+            return '{"result":"answer","usage":{"input_tokens":9,"output_tokens":2}}', ""
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr("project_ensemble.providers.claude_code.subprocess.Popen", FakeProcess)
     adapter = ClaudeCodeAdapter("claude_lab", command="claude", models=["sonnet"], api_key="secret")
     response = adapter.generate(GenerationRequest(model_id="sonnet", system_text="private rules", user_text="question"))
     assert response.text == "answer"
-    assert seen["kwargs"]["input"] == "question"
+    assert seen["input"] == "question"
     assert seen["kwargs"]["env"]["ANTHROPIC_API_KEY"] == "secret"
     assert "secret" not in " ".join(seen["argv"])
     assert "--bare" in seen["argv"] and "--disallowedTools" in seen["argv"]

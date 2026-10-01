@@ -30,7 +30,7 @@ from project_ensemble.private_registry import (
 from project_ensemble.storage.documents import ImmutableDocumentStore
 from project_ensemble.storage.events import HashChainEventLog
 from project_ensemble.storage.human_outputs import ensure_visible_link
-from project_ensemble import __version__
+from project_ensemble import GOVERNANCE_VERSION, __version__
 
 
 class PublicMeetingManifest(BaseModel):
@@ -90,7 +90,7 @@ class PrivateMeetingManifest(BaseModel):
     personas: list[str]
     governance_digest: str
     software_version: str = __version__
-    governance_version: str = "0.7.1"
+    governance_version: str = GOVERNANCE_VERSION
     representative_prompt_family: Literal[
         "legacy_shared", "deliberation", "literature_research"
     ] = "legacy_shared"

@@ -18,7 +18,7 @@ from typing import Any
 
 from project_ensemble.domain import GenerationRequest, ReasoningEffort
 from project_ensemble.providers.retry import call_with_retries
-from project_ensemble.research.pdf_warnings import capture_duplicate_pdf_length_warnings
+from project_ensemble.research.pdf_warnings import capture_recoverable_pdf_warnings
 from project_ensemble.research.retrievers import coerce_retrieval_result
 from project_ensemble.runtime.structured_output import parse_json_object
 from project_ensemble.storage.meeting_index import meeting_is_complete
@@ -77,7 +77,7 @@ def _read_public_text(path: Path) -> str:
             from pypdf import PdfReader  # optional for existing source checkouts
         except ImportError:
             return ""
-        with capture_duplicate_pdf_length_warnings():
+        with capture_recoverable_pdf_warnings():
             reader = PdfReader(io.BytesIO(path.read_bytes()))
             return "\n".join(
                 f"[PDF page {index}] {page.extract_text() or ''}"

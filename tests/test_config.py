@@ -84,6 +84,30 @@ def test_reasoning_effort_support_is_model_scoped():
     assert not provider.supports_reasoning_effort("gemini-3-flash-preview", "medium")
 
 
+def test_existing_lithos_profile_gets_kimi_k3_reasoning_effort_mapping(tmp_path):
+    path = tmp_path / "ensemble.toml"
+    path.write_text(
+        """
+[project]
+workspace = "./meetings"
+
+[providers.lithos]
+kind = "openai_compatible"
+display_name = "LithosAI"
+base_url = "https://api.lithosai.cloud/v1"
+api_key_env = "LITHOSAI_API_KEY"
+""".strip() + "\n",
+        encoding="utf-8",
+    )
+
+    provider = load_config(path).providers["lithos"]
+    assert provider.supports_reasoning_effort("kimi-k3", "low")
+    assert provider.supports_reasoning_effort("kimi-k3", "medium")
+    assert provider.supports_reasoning_effort("kimi-k3", "high")
+    assert not provider.supports_reasoning_effort("kimi-k2.6", "high")
+    assert provider.reasoning_effort_map == {"low": "low", "medium": "high", "high": "max"}
+
+
 def test_concurrency_configuration_is_model_scoped_and_defaults_to_auto():
     provider = ProviderConfig(
         kind="openai_compatible",

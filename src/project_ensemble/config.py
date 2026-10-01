@@ -268,6 +268,14 @@ def load_config(path: str | Path) -> EnsembleConfig:
             )
         data["providers"] = model_data.get("providers", {})
     config = EnsembleConfig.model_validate(data)
+    # Lithos exposes Kimi K3 through its OpenAI-compatible endpoint.  Existing
+    # Lithos profiles predate its K3 effort control, so supply the documented
+    # model-scoped mapping in memory unless the user configured one explicitly.
+    lithos = config.providers.get("lithos")
+    if lithos and lithos.kind == "openai_compatible" and not lithos.reasoning_effort_map:
+        lithos.reasoning_effort_transport = "openai"
+        lithos.reasoning_effort_map = {"low": "low", "medium": "high", "high": "max"}
+        lithos.reasoning_effort_model_patterns = ["*kimi-k3*"]
     config._source_path = source
     if config.project.model_config_file:
         config.project.model_config_file = str(model_source)

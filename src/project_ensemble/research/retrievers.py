@@ -118,7 +118,7 @@ class PolicyResearchRetriever:
             )
         return self._with_fallback(self.openalex, self.tavily, claim)
 
-    def retrieve_exploratory(self, query: str) -> ResearchRetrievalResult:
+    def retrieve_exploratory(self, query: str, *, academic_only: bool = False) -> ResearchRetrievalResult:
         # Broad exploration needs both scholarly and web coverage when both
         # backends are healthy; quota-wait policy still forbids silently
         # publishing a Tavily-only response for an OpenAlex search.
@@ -145,6 +145,8 @@ class PolicyResearchRetriever:
             return self._fallback(self.tavily.retrieve_exploratory(query), "openalex", exc)
         except OpenAlexConnectionUnavailable as exc:
             return self._fallback(self.tavily.retrieve_exploratory(query), "openalex", exc)
+        if academic_only:
+            return academic
         try:
             web = self.tavily.retrieve_exploratory(query)
         except TransientProviderError as exc:
@@ -307,18 +309,27 @@ class CompositeRetriever:
             failed_backend_ids=tuple(dict.fromkeys(failed_backend_ids)),
         )
 
-    def retrieve_exploratory(self, query: str) -> ResearchRetrievalResult:
+    def retrieve_exploratory(self, query: str, *, academic_only: bool = False) -> ResearchRetrievalResult:
         """Run one broad query without the four-claim adversarial-query contract."""
         candidates: dict[str, dict[str, Any]] = {}
         trace: list[dict[str, Any]] = []
         successful: list[str] = []
         failed: list[str] = []
-        with ThreadPoolExecutor(max_workers=len(self.retrievers)) as executor:
+        retrievers = tuple(
+            retriever for retriever in self.retrievers
+            if not (academic_only and isinstance(retriever, TavilyRetriever))
+        )
+        if not retrievers:
+            raise TransientProviderError("academic exploratory search has no scholarly backend")
+        with ThreadPoolExecutor(max_workers=len(retrievers)) as executor:
             futures = [
-                executor.submit(retriever.retrieve_exploratory, query)
-                for retriever in self.retrievers
+                executor.submit(
+                    retriever.retrieve_exploratory, query, academic_only=True,
+                ) if academic_only and isinstance(retriever, PolicyResearchRetriever)
+                else executor.submit(retriever.retrieve_exploratory, query)
+                for retriever in retrievers
             ]
-        for retriever, future in zip(self.retrievers, futures, strict=True):
+        for retriever, future in zip(retrievers, futures, strict=True):
             try:
                 result = coerce_retrieval_result(
                     future.result(), default_backend_ids=retriever.backend_ids

@@ -40,7 +40,10 @@ from project_ensemble.orchestration.literature_style import (
     leaked_internal_identifiers,
     replace_reader_module_ids,
 )
-from project_ensemble.orchestration.readability_policy import reader_facing_prose_contract
+from project_ensemble.orchestration.readability_policy import (
+    reader_facing_prose_contract, structured_prose_context_from_repo,
+    structured_result_prose_contract,
+)
 from project_ensemble.research.desk import ResearchDesk
 from project_ensemble.research.models import EvidencePacket, ResearchRequest, ResearchStage
 from project_ensemble.runtime.context import RepresentativeContextAssembler
@@ -1561,9 +1564,7 @@ class LiteratureReportExecutionRunner:
             chapter_target = max(1, round(target * 0.8 / len(outline.modules)))
             chapter_context["chapter_body_length_guidance"] = {
                 "target_non_whitespace_characters": chapter_target,
-                "reference_range_characters": [
-                    chapter_target * 4 // 5, chapter_target * 6 // 5,
-                ],
+                "policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
                 "scope": "本章正文；参考文献与独立附录不计；不要为凑字数重复或编造内容",
             }
         if review_path is not None:
@@ -3403,6 +3404,37 @@ class LiteratureReportExecutionRunner:
              + "".join(f"[{citation_id}]" for citation_id in entry.source_citation_ids))
             for entry in glossary
         ]
+        unresolved_packets = {}
+        unresolved_appendix_prose: list[str] = []
+        seen_unresolved_appendix_questions: set[str] = set()
+        for packet_id in dict.fromkeys(all_unresolved):
+            packet = self._load_packet(packet_id)
+            unresolved_packets[packet_id] = packet
+            if packet is None:
+                continue
+            for question in packet.unresolved_questions:
+                detail = question.strip()
+                if detail and detail not in seen_unresolved_appendix_questions:
+                    seen_unresolved_appendix_questions.add(detail)
+                    unresolved_appendix_prose.append(detail)
+        local_science_notes: list[str] = []
+        for outcome in completed:
+            if outcome.get("local_science_check_status") != "MATERIAL_PROBLEM":
+                continue
+            check = json.loads(
+                (self.repo.root / outcome["local_science_check_path"]).read_text(encoding="utf-8")
+            )
+            detail = "；".join(
+                item["problem"] for item in check.get("checks", [])
+                if item.get("status") == "MATERIAL_PROBLEM" and item.get("problem")
+            )
+            if detail:
+                prefix = {
+                    "zh": "人类知悉风险后保留的局部科学异议",
+                    "en": "Local scientific concern retained after Human review",
+                    "fr": "Réserve scientifique locale conservée après examen humain",
+                }[language]
+                local_science_notes.append(f"{prefix} ({outcome['module_id']}): {detail}")
         prose = [synthesis.abstract] if preferences.get("full_abstract", True) else []
         prose.extend(glossary_prose)
         if synthesis.body_sections:
@@ -3428,10 +3460,20 @@ class LiteratureReportExecutionRunner:
                     (self.repo.root / outcome["dissents_path"]).read_text(encoding="utf-8")
                 )
                 prose.extend(item["text"] for item in dissent_record["dissents"])
-        all_chapter_ids = set(_CHAPTER_SOURCE_MARKER.findall(
+        # These sections are rendered after the bibliography is assembled, but
+        # their citations still belong in the same numbered reference system.
+        publication_prose = [
+            *prose, *unresolved_appendix_prose, *local_science_notes,
+        ]
+        body_chapter_ids = set(_CHAPTER_SOURCE_MARKER.findall(
             "\n".join(_normalize_grouped_chapter_citations(text) for text in prose)
         ))
-        all_mentioned_chapter_ids = set(_CHAPTER_SOURCE_ID.findall("\n".join(prose)))
+        all_chapter_ids = set(_CHAPTER_SOURCE_MARKER.findall(
+            "\n".join(_normalize_grouped_chapter_citations(text) for text in publication_prose)
+        ))
+        all_mentioned_chapter_ids = set(
+            _CHAPTER_SOURCE_ID.findall("\n".join(publication_prose))
+        )
         bare_chapter_ids = all_mentioned_chapter_ids - all_chapter_ids
         catalog_by_id: dict[str, dict] = {}
         for outcome, _draft in module_drafts:
@@ -3445,7 +3487,7 @@ class LiteratureReportExecutionRunner:
         unknown_chapter_ids = all_mentioned_chapter_ids - catalog_by_id.keys()
         if unknown_chapter_ids:
             raise ValueError(f"unresolved chapter citations: {sorted(unknown_chapter_ids)}")
-        for identifier in sorted(all_chapter_ids):
+        for identifier in sorted(body_chapter_ids):
             all_packet_ids.extend(catalog_by_id[identifier].get("packet_ids", []))
         citation_aliases = self._citation_aliases(list(dict.fromkeys(all_packet_ids)))
         _declared_map, _declared_lines, reference_trace = self._citation_apparatus(
@@ -3467,16 +3509,23 @@ class LiteratureReportExecutionRunner:
         # Keep the original frozen trace; append references omitted from a
         # draft's cited_packet_ids in a separate versioned trace.
         embedded_ids = list(dict.fromkeys(
-            packet_id for text in prose
+            packet_id for text in publication_prose
             for packet_id in _PACKET_MARKER.findall(_normalize_grouped_packet_citations(text))
         ))
         extra_ids = [packet_id for packet_id in embedded_ids if packet_id not in all_packet_ids]
+        late_chapter_packet_ids = [
+            packet_id for citation_id in sorted(all_chapter_ids - body_chapter_ids)
+            for packet_id in catalog_by_id[citation_id].get("packet_ids", [])
+            if packet_id not in all_packet_ids
+        ]
         bare_packet_ids = [
             packet_id for citation_id in sorted(bare_chapter_ids)
             for packet_id in catalog_by_id[citation_id].get("packet_ids", [])
             if packet_id not in all_packet_ids
         ]
-        full_packet_ids = list(dict.fromkeys([*all_packet_ids, *extra_ids, *bare_packet_ids]))
+        full_packet_ids = list(dict.fromkeys([
+            *all_packet_ids, *extra_ids, *late_chapter_packet_ids, *bare_packet_ids,
+        ]))
         full_aliases = self._citation_aliases(full_packet_ids)
         citation_map, reference_lines, full_trace = self._citation_apparatus(
             full_packet_ids, aliases=full_aliases
@@ -3505,12 +3554,26 @@ class LiteratureReportExecutionRunner:
         if not legacy_citation_order:
             citation_map, chapter_citation_map, reference_lines, full_trace = (
                 self._number_sources_by_first_appearance(
-                    prose=[self._bracket_bare_chapter_ids(text) for text in prose],
+                    prose=[
+                        self._bracket_bare_chapter_ids(text) for text in publication_prose
+                    ],
                     packet_numbers=citation_map,
                     chapter_numbers=chapter_citation_map,
                     reference_lines=reference_lines, trace=full_trace,
                 )
             )
+        # Late appendix prose can mention a chapter citation that also occurs
+        # in the main text, or in an unsourced-claim note appended below. Keep
+        # every catalog alias whose source is already in the final bibliography
+        # available to the final deterministic rendering pass.
+        final_source_numbers = {
+            _source_identity_key(item.get("doi"), item["url"]): item["reference_number"]
+            for item in full_trace
+        }
+        for citation_id, source in catalog_by_id.items():
+            key = _source_identity_key(source.get("doi"), source["url"])
+            if key in final_source_numbers:
+                chapter_citation_map.setdefault(citation_id, final_source_numbers[key])
         if not full_trace:
             reference_lines = [{
                 "zh": "本报告正文未引用可编号的公开文献。",
@@ -3540,9 +3603,36 @@ class LiteratureReportExecutionRunner:
             supplement_path = self.repo.root / supplement_relative
             if supplement_path.exists():
                 if json.loads(supplement_path.read_text(encoding="utf-8")) != supplement:
-                    raise ValueError("frozen supplemental citation trace conflicts with current sources")
+                    matching_path = next((
+                        path for path in sorted(
+                            (self.repo.root / "public/literature_report").glob(
+                                "citation_trace_assembly_v*.json"
+                            )
+                        )
+                        if json.loads(path.read_text(encoding="utf-8")) == supplement
+                    ), None)
+                    if matching_path is not None:
+                        supplement_path = matching_path
+                    else:
+                        existing_versions = [
+                            int(match.group(1))
+                            for path in (self.repo.root / "public/literature_report").glob(
+                                "citation_trace_assembly_v*.json"
+                            )
+                            if (match := re.fullmatch(
+                                r"citation_trace_assembly_v(\d+)\.json", path.name
+                            ))
+                        ]
+                        next_version = max([2, *existing_versions]) + 1
+                        supplement_relative = Path(
+                            f"public/literature_report/citation_trace_assembly_v{next_version}.json"
+                        )
+                        supplement_path = self.repo.root / supplement_relative
+                if not supplement_path.exists():
+                    self.repo.docs.write_once(supplement_relative, supplement_text)
             else:
                 self.repo.docs.write_once(supplement_relative, supplement_text)
+            supplement_relative = supplement_path.relative_to(self.repo.root)
         effective_trace = supplement_relative if use_supplement else trace_relative
         parts = [f"# {synthesis.title}"]
         if preferences.get("full_abstract", True) and synthesis.abstract:
@@ -3612,7 +3702,7 @@ class LiteratureReportExecutionRunner:
         parts.append(f"\n## {headings['unresolved']}")
         seen_unresolved_questions: set[str] = set()
         for item in dict.fromkeys(all_unresolved):
-            packet = self._load_packet(item)
+            packet = unresolved_packets.get(item)
             reason = (
                 "MISSING_EVIDENCE_PACKET" if packet is None else
                 "NO_UNRESOLVED_QUESTION" if not packet.unresolved_questions else None
@@ -3633,7 +3723,7 @@ class LiteratureReportExecutionRunner:
                 if not (self.repo.root / relative).exists():
                     self.repo.docs.write_once(relative, json.dumps(record, indent=2, ensure_ascii=False))
                 continue
-            for question in packet.unresolved_questions:
+            for question in unresolved_packets[item].unresolved_questions:
                 detail = question.strip()
                 if detail and detail not in seen_unresolved_questions:
                     seen_unresolved_questions.add(detail)
@@ -3644,22 +3734,8 @@ class LiteratureReportExecutionRunner:
                 "en": "No additional unresolved chapter questions were recorded.",
                 "fr": "Aucune autre question de chapitre non résolue n'a été enregistrée.",
             }[language])
-        for outcome in completed:
-            if outcome.get("local_science_check_status") != "MATERIAL_PROBLEM":
-                continue
-            check = json.loads(
-                (self.repo.root / outcome["local_science_check_path"]).read_text(encoding="utf-8")
-            )
-            detail = "；".join(
-                item["problem"] for item in check.get("checks", [])
-                if item.get("status") == "MATERIAL_PROBLEM" and item.get("problem")
-            )
-            prefix = {
-                "zh": "人类知悉风险后保留的局部科学异议",
-                "en": "Local scientific concern retained after Human review",
-                "fr": "Réserve scientifique locale conservée après examen humain",
-            }[language]
-            parts.append(f"\n- {prefix} ({outcome['module_id']}): {detail}")
+        for note in local_science_notes:
+            parts.append(f"\n- {note}")
         if unnumbered_ids:
             parts.append(f"\n## {headings['unsourced']}")
             for packet_id in unnumbered_ids:
@@ -3675,7 +3751,32 @@ class LiteratureReportExecutionRunner:
         parts.extend(reference_lines)
         # The trace is a separate audit/provenance object, not reader prose.
         _ = effective_trace
+        if freeze_supplemental_trace:
+            # Publication uses the exact, already-numbered source apparatus
+            # assembled alongside this final Markdown. Keep it on the runner
+            # so HTML source/PDF links use the same citation universe.
+            self._publication_packet_ids = full_packet_ids
+            self._publication_reference_trace = full_trace
         report = repair_json_decoded_math_commands("\n".join(parts).strip() + "\n")
+        # Some reader-facing appendix fields are assembled after per-field
+        # rendering (for example, unresolved questions). Run the same frozen
+        # citation maps over the completed document once more so known chapter
+        # and packet IDs in those fields cannot leak into the publication.
+        # This is a deterministic presentation repair; it does not alter claims
+        # or infer new source mappings.
+        try:
+            report = self._render_packet_citations(
+                self._bracket_bare_chapter_ids(report),
+                citation_map,
+                language=language,
+                chapter_citation_map=chapter_citation_map,
+            )
+        except ValueError as exc:
+            # Preserve the final invariant error below, which reports the exact
+            # unresolved IDs, rather than replacing it with the renderer's
+            # generic marker error.
+            if "unresolved internal citation marker in reader text" not in str(exc):
+                raise
         remaining = re.findall(r"\b(?:C[0-9]{5}-[0-9]{5}|RP-[A-Z0-9]{6,})\b", report)
         if remaining:
             raise ValueError(
@@ -3856,6 +3957,8 @@ class LiteratureReportExecutionRunner:
     def _publish(
         self, markdown: str, completed: list[dict], contested: int
     ) -> LiteratureReportExecutionResult:
+        full_packet_ids = getattr(self, "_publication_packet_ids", [])
+        full_trace = getattr(self, "_publication_reference_trace", [])
         self.engine.status.phase = MeetingPhase.LITERATURE_REPORT_PUBLICATION
         self.engine.progress.status(
             MeetingPhase.LITERATURE_REPORT_PUBLICATION,
@@ -3917,15 +4020,12 @@ class LiteratureReportExecutionRunner:
         target = self._writing_preferences().get("target_body_characters")
         if target is not None:
             actual = self._count_report_body_characters(markdown)
-            lower, upper = target * 4 // 5, target * 6 // 5
             outcome = {
                 "target_body_characters": target,
-                "lower_reference_characters": lower,
-                "upper_reference_characters": upper,
                 "actual_body_characters": actual,
-                "within_reference_range": lower <= actual <= upper,
+                "difference_from_target_characters": actual - target,
                 "measurement": "non-whitespace Unicode characters before reference/appendix headings",
-                "policy": "SOFT_GUIDANCE_NO_PUBLICATION_BLOCK",
+                "policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
                 "report_markdown_sha256": markdown_sha,
             }
             outcome_relative = Path(
@@ -3935,15 +4035,17 @@ class LiteratureReportExecutionRunner:
             )
             outcome_path = self.repo.root / outcome_relative
             if outcome_path.exists():
-                if json.loads(outcome_path.read_text(encoding="utf-8")) != outcome:
+                frozen_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+                # Existing meetings may have frozen the former advisory-range schema.
+                # Reuse it for the same exact publication; never gate recovery on metadata shape.
+                if frozen_outcome.get("report_markdown_sha256") != markdown_sha:
                     raise ValueError("frozen literature report length outcome conflicts with current publication")
             else:
                 self.repo.docs.write_once(outcome_relative, json.dumps(outcome, indent=2, ensure_ascii=False))
-            if not outcome["within_reference_range"]:
-                self.engine.progress.info(
-                    f"报告正文实测 {actual:,} 个非空白字符；超出目标 {target:,} 的 ±20% 参考范围，"
-                    "已记录偏差但不阻断出版"
-                )
+            self.engine.progress.info(
+                f"报告正文实测 {actual:,} 个非空白字符；建议篇幅为 {target:,} 个非空白字符。"
+                "建议仅供参考，不作硬性限制，也不保证最终长度。"
+            )
         markdown_path = self.repo.root / markdown_relative
         if markdown_path.exists():
             if hashlib.sha256(markdown_path.read_bytes()).hexdigest() != markdown_sha:
@@ -4001,10 +4103,29 @@ class LiteratureReportExecutionRunner:
             }:
                 raise ValueError("frozen HTML report does not match its source and provenance")
         else:
+            original_document_urls: dict[str, str] = {}
+            for packet_id in full_packet_ids:
+                packet = self._load_packet(packet_id)
+                if packet is None:
+                    continue
+                for source in packet.sources:
+                    if source.original_document_url:
+                        original_document_urls.setdefault(source.source_id, source.original_document_url)
+            reference_links = {}
+            for item in full_trace:
+                doi = str(item.get("doi") or "").strip()
+                doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", doi, flags=re.I)
+                source_link = f"https://doi.org/{doi}" if doi else str(item.get("url") or "")
+                item_links = {"source": source_link}
+                pdf_link = original_document_urls.get(item["source_id"])
+                if pdf_link:
+                    item_links["pdf"] = pdf_link
+                reference_links[str(item["reference_number"])] = item_links
             html_document = render_academic_review_html(
                 markdown, meeting_id=self.repo.meeting_id,
                 language=self._writing_preferences().get("language"),
                 palette=report_palette,
+                reference_links=reference_links,
             )
             html_bytes = html_document.encode("utf-8")
             self.repo.docs.write_once(html_relative, html_bytes)
@@ -4185,6 +4306,14 @@ class LiteratureReportExecutionRunner:
         user: dict,
     ) -> BaseModel:
         if schema.__name__ in {
+            "FastPlanningTurn", "FastBreadthSearchPlan", "FastSplitProposal",
+            "FastTaskbook", "FastModulePlan", "ModuleWritingOutline", "OutlineBallot",
+        }:
+            preferences, disciplines = structured_prose_context_from_repo(self.repo)
+            system += structured_result_prose_contract(
+                preferences, disciplines, planning_scope=True,
+            )
+        if schema.__name__ in {
             "ModuleDraft", "WholeReportSynthesis", "FastWholeSynthesis",
             "WriterChapter", "FastLocalScienceRepair", "ReaderFacingLineRepair",
             "PublicationPatchSet",
@@ -4211,6 +4340,9 @@ class LiteratureReportExecutionRunner:
             stage=stage,
             max_output_tokens=self.max_output_tokens,
             semantic_requirement="仅返回要求的限量产物，不改变冻结内容。",
+            original_system_text=system,
+            original_user_text=user_text,
+            fresh_attempts_remaining=1,
         )
 
     def _compact_evidence_index(self) -> list[dict]:
@@ -4477,8 +4609,57 @@ class LiteratureReportExecutionRunner:
                 }[language]
             )
             rendered = rendered.replace(f"[{packet_id}]", marker)
-        for citation_id, number in (chapter_citation_map or {}).items():
-            rendered = rendered.replace(f"[{citation_id}]", f"[{number}]")
+        chapter_numbers = chapter_citation_map or {}
+        if chapter_numbers:
+            # Replace the ID token wherever it occurs, not only the exact
+            # spelling ``[C... ]``. Model output can mix temporary IDs and
+            # already-rendered numeric citations inside one outer bracket,
+            # e.g. ``[C1-1, [12], C1-2]``. Exact marker replacement misses
+            # those IDs because the outer bracket prevents them from being
+            # represented as standalone ``[C...]`` markers.
+            rendered = _CHAPTER_SOURCE_ID.sub(
+                lambda match: f"[{chapter_numbers[match.group(0)]}]"
+                if match.group(0) in chapter_numbers else match.group(0),
+                rendered,
+            )
+
+        # Flatten citation-only nested groups created by mixed bracket styles
+        # (``[C1-1, [12], C1-2]`` -> ``[[3], [12], [4]]``). Groups containing
+        # prose are deliberately left intact.
+        def flatten_numeric_groups(value: str) -> str:
+            """Recursively flatten balanced bracket groups containing citations only."""
+            output: list[str] = []
+            index = 0
+            while index < len(value):
+                if value[index] != "[":
+                    output.append(value[index])
+                    index += 1
+                    continue
+                depth = 1
+                end = index + 1
+                while end < len(value) and depth:
+                    if value[end] == "[":
+                        depth += 1
+                    elif value[end] == "]":
+                        depth -= 1
+                    end += 1
+                if depth:
+                    output.append(value[index:])
+                    break
+                inner = flatten_numeric_groups(value[index + 1:end - 1])
+                citation_numbers = re.sub(
+                    r"\[([0-9]+(?:\s*,\s*[0-9]+)*)\]", r"\1", inner,
+                )
+                if (re.fullmatch(r"[0-9\s,，;；、]+", citation_numbers)
+                        and re.search(r"[0-9]", citation_numbers)):
+                    numbers = list(dict.fromkeys(re.findall(r"[0-9]+", citation_numbers)))
+                    output.append("[" + ", ".join(numbers) + "]")
+                else:
+                    output.append("[" + inner + "]")
+                index = end
+            return "".join(output)
+
+        rendered = flatten_numeric_groups(rendered)
         numeric_run = re.compile(r"(?:\[(?:[0-9]+(?:,\s*[0-9]+)*)\]){2,}")
 
         def merge_numeric_citations(match: re.Match[str]) -> str:
@@ -4509,7 +4690,14 @@ class LiteratureReportExecutionRunner:
     def _writing_preferences(self) -> dict:
         path = self.repo.root / "public/literature_report/writing_preferences.json"
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            preferences = json.loads(path.read_text(encoding="utf-8"))
+            # Normalize old frozen meetings without editing their immutable preferences.
+            preferences.pop("length_tolerance_fraction", None)
+            if preferences.get("target_body_characters") is not None:
+                preferences["target_length_policy"] = (
+                    "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED"
+                )
+            return preferences
         # Existing v0.7 meetings retain their original Chinese publication
         # behavior rather than silently receiving new startup choices.
         return {

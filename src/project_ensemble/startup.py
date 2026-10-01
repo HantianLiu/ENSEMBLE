@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import threading
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -213,7 +214,8 @@ def _interactive_terminal_input(prompt: str) -> str:
     # ``input()`` only delegates to readline when the process still owns the
     # original standard streams.  Embedders and PTY-based callers often wrap
     # those streams, so use the compatible editor below in that case.
-    if sys.stdin is not sys.__stdin__ or sys.stdout is not sys.__stdout__:
+    if (threading.current_thread() is not threading.main_thread()
+            or sys.stdin is not sys.__stdin__ or sys.stdout is not sys.__stdout__):
         return _interactive_terminal_input_raw(prompt)
     try:
         # Importing readline enables editing for Python's input() on POSIX.
@@ -495,6 +497,7 @@ class StartupSelection:
     openalex_quota_policy: Literal["wait", "tavily"] = "wait"
     research_max_concurrent_claim_groups: int | None = None
     maximum_parallelism: bool = False
+    model_concurrency_limit: int | None = None
     decision_rigor: DecisionRigor = DecisionRigor.STRICT
     deliverable_type: DeliverableType = DeliverableType.NORMATIVE_INSTRUMENT
     meeting_title: str | None = None
@@ -553,16 +556,34 @@ def natural_meeting_title(task_description: str, *, max_characters: int = 56) ->
     return candidate or "未命名会议"
 
 
+def config_with_providers_enabled(
+    config: EnsembleConfig, provider_ids: list[str]
+) -> EnsembleConfig:
+    """Return an in-memory config enabling selected providers for this operation only."""
+    unknown = sorted(set(provider_ids) - set(config.providers))
+    if unknown:
+        raise PermanentProviderError(f"selected providers are unavailable or unconfigured: {', '.join(unknown)}")
+    providers = dict(config.providers)
+    for provider_id in provider_ids:
+        provider = providers[provider_id]
+        if not provider.enabled:
+            providers[provider_id] = provider.model_copy(update={"enabled": True})
+    return config.model_copy(update={"providers": providers})
+
+
 def discover_models(config: EnsembleConfig, provider_ids: list[str]) -> list[ModelDescriptor]:
     unknown = sorted(set(provider_ids) - set(config.providers))
     if unknown:
         raise PermanentProviderError(f"selected providers are unavailable or unconfigured: {', '.join(unknown)}")
+    # A selected, configured provider is available for this operation. The
+    # legacy `enabled` field is not a user-facing availability switch.
+    discovery_config = config_with_providers_enabled(config, provider_ids)
     selected = {
-        provider_id: config.providers[provider_id]
+        provider_id: discovery_config.providers[provider_id]
         for provider_id in provider_ids
-        if config.providers[provider_id].enabled
+        if discovery_config.providers[provider_id].enabled
     }
-    adapters = build_adapters(config.model_copy(update={"providers": selected}), require_keys=True)
+    adapters = build_adapters(discovery_config.model_copy(update={"providers": selected}), require_keys=True)
     unavailable = sorted(set(provider_ids) - set(adapters))
     if unavailable:
         raise PermanentProviderError(
@@ -718,12 +739,12 @@ class TerminalWizard:
         """Explain what happens to the Human's request before model setup."""
         workflows = {
             "fast_literature_review": (
-                "你的需求先交给两至三个独立模型，各自做一轮探索性检索并提出模块拆分方案；"
-                "学术主笔只看匿名方案，自行整理成可审阅的任务书与模块范围。你确认后，主笔逐模块提出问题，"
+                "快速模式可先由两至三个独立模型各做一轮探索性检索并提出匿名模块方案，也可跳过多人协作、"
+                "直接由学术主笔拆分模块。你确认任务书与模块范围后，主笔逐模块提出问题，"
                 "Research Desk 检索并核查来源。主笔按知识卡和文献写作，独立模型复核科学问题，"
                 "最后组装综述、术语表和引文。范围与未解决的关键争议会交还给你决定。",
-                "Two or three independent models each perform one exploratory search and propose a module split. "
-                "The writer sees only anonymous proposals and independently drafts a reviewable taskbook. After your approval, "
+                "Fast mode can ask two or three independent models to search and propose anonymous module plans, "
+                "or skip that collaboration and let the writer plan modules directly. After you approve the taskbook, "
                 "the writer asks module questions, Research Desk checks sources, and the writer drafts "
                 "from evidence cards. Independent models review science before the report, glossary, "
                 "and references are assembled. You decide unresolved scope or material disputes.",
@@ -1421,10 +1442,10 @@ class TerminalWizard:
             )
         )
 
-        enabled = [(pid, self._provider_description(pid, config)) for pid, cfg in config.providers.items() if cfg.enabled]
-        if not enabled:
-            raise PermanentProviderError("configuration contains no enabled providers")
-        providers = self._choose_many("2/10 选择模型供应商", enabled, blank_means_all=True)
+        configured = [(pid, self._provider_description(pid, config)) for pid in config.providers]
+        if not configured:
+            raise PermanentProviderError("configuration contains no configured providers")
+        providers = self._choose_many("2/10 选择模型供应商", configured, blank_means_all=True)
 
         self._print("\n" + styled("正在从所选供应商实时发现模型……", CYAN, enabled=self.color))
         catalog = discover_models(config, providers)
@@ -1584,7 +1605,7 @@ class TerminalWizard:
             if rendering_scope_description is None:
                 while True:
                     raw_length = self.input(
-                        "目标正文长度（字符数；不含参考文献和独立附录，允许上下浮动 20%）: "
+                        "建议正文长度（字符数；仅供写作参考，不是硬性限制，最终长度不保证；不含参考文献和独立附录）: "
                     ).strip().replace(",", "")
                     if raw_length.isdecimal() and int(raw_length) >= 1000:
                         rendering_target_body_characters = int(raw_length)
@@ -1642,16 +1663,29 @@ class TerminalWizard:
             writer_reasoning_effort = ReasoningEffort(self._choose_one(
                 "6/10 学术主笔推理强度", self._reasoning_options(config, (writer_model,))
             ))
-            self._print("  接下来选择 2–3 个只负责提出模块拆分方案的模型。每个模型独立做一轮探索性检索；主笔只看匿名方案，独立拟定任务书。此阶段沿用刚设定的智库长推理强度。")
-            while True:
-                chosen = self._choose_many(
-                    "选择模块拆分提议模型（2–3 个；不参与此后的科学审阅身份）",
-                    catalog_options,
-                )
-                if 2 <= len(chosen) <= 3:
-                    fast_planner_models = tuple(self._parse_provider_model(value) for value in chosen)
-                    break
-                self._print(styled("请选择两个或三个不同模型。", YELLOW, enabled=self.color))
+            planning_mode = self._choose_one(
+                "模块拆分方式",
+                [
+                    ("parallel", "多人协作：可能改善知识覆盖；会增加调用成本，也可能因模块增多而拉长报告"),
+                    ("writer_only", "跳过多人协作：由学术主笔独立拆分模块并制定任务书"),
+                ],
+            )
+            if planning_mode == "parallel":
+                self._print("  多模型并行提议有助于改善知识覆盖率，但可能增加调用成本并因模块增多而推高篇幅。")
+                self._print("  建议篇幅仅供主笔参考；不设硬性长度限制，也不保证最终报告达到该长度。")
+                self._print("  每个提议模型各做一轮探索性检索；提议模型不参与之后的科学审阅。")
+                while True:
+                    chosen = self._choose_many(
+                        "选择模块拆分提议模型（2–3 个；不参与此后的科学审阅身份）",
+                        catalog_options,
+                    )
+                    if 2 <= len(chosen) <= 3:
+                        fast_planner_models = tuple(self._parse_provider_model(value) for value in chosen)
+                        break
+                    self._print(styled("请选择两个或三个不同模型。", YELLOW, enabled=self.color))
+            else:
+                fast_planner_models = ()
+                self._print("  已跳过多人协作；学术主笔将独立拆分模块。建议篇幅仅供参考，不保证最终长度。")
             research_model = self._parse_provider_model(self._choose_one(
                 "7/10 指定 Research Desk 模型", catalog_options
             ))
@@ -1659,7 +1693,11 @@ class TerminalWizard:
                 "8/10 Research Desk 推理强度", self._reasoning_options(config, (research_model,))
             ))
             research_enabled = True
-            self._print("  简易流程的正式会议不任命主席。你可以直接提交完整研究委托，也可以先与会前筹备主席讨论；独立模型先提拆分方案，之后学术主笔会拟定模块任务书供你批准。")
+            self._print(
+                "  简易流程的正式会议不任命主席。你可以直接提交完整研究委托，也可以先与会前筹备主席讨论；"
+                + ("多人提议之后由学术主笔拟定模块任务书供你批准。"
+                   if fast_planner_models else "学术主笔将独立拆分模块并拟定任务书供你批准。")
+            )
             task_prompt = "\n请输入完整研究委托（正式研究开始前仍会审阅模块任务书）: "
             email_prompt = "\n输入人工介入通知邮箱（可留空）: "
         else:
@@ -1937,7 +1975,7 @@ class TerminalWizard:
             ))
             while True:
                 raw_length = self.input(
-                    "整篇报告目标正文长度（非空白字符数；不含参考文献和独立附录，允许上下浮动 20%）: "
+                    "建议正文长度（非空白字符数；仅供写作参考，不是硬性限制，最终长度不保证；不含参考文献和独立附录）: "
                 ).strip().replace(",", "")
                 if raw_length.isdecimal() and int(raw_length) >= 1000:
                     literature_target_body_characters = int(raw_length)
@@ -1992,6 +2030,36 @@ class TerminalWizard:
                 self._reasoning_options(config, (technician_model,)),
             ))
 
+        self._section("模型同时在途调用上限")
+        self._print(
+            "  这是每个基础模型可同时处理的请求数，不是 Research Desk 的独立问题组数。"
+            if self.language == "zh" else
+            "  This caps simultaneous calls per base model; it is separate from Research Desk task groups."
+        )
+        self._print(
+            "  直接回车沿用当前配置（简易文献调研通常每模型 4 路）；输入 1–16 则统一覆盖本次所选模型。"
+            if self.language == "zh" else
+            "  Enter keeps configured defaults (usually 4 per model for fast research); 1–16 overrides all selected models."
+        )
+        model_concurrency_limit: int | None = None
+        while True:
+            raw_limit = self.input(
+                "每个模型最多同时调用多少次 [沿用当前配置]: "
+                if self.language == "zh" else
+                "Maximum simultaneous calls per model [keep current settings]: "
+            ).strip()
+            if not raw_limit:
+                break
+            if raw_limit.isascii() and raw_limit.isdecimal() and 1 <= int(raw_limit) <= 16:
+                model_concurrency_limit = int(raw_limit)
+                break
+            self._print(styled(
+                "请输入 1–16 的整数，或回车沿用当前配置。"
+                if self.language == "zh" else
+                "Enter an integer from 1 to 16, or press Enter to keep current settings.",
+                YELLOW, enabled=self.color,
+            ))
+
         selection = StartupSelection(
             meeting_type=meeting_type,
             providers=tuple(providers),
@@ -2008,6 +2076,7 @@ class TerminalWizard:
             openalex_quota_policy=openalex_quota_policy,
             research_max_concurrent_claim_groups=research_max_concurrent_claim_groups,
             maximum_parallelism=maximum_parallelism,
+            model_concurrency_limit=model_concurrency_limit,
             decision_rigor=decision_rigor,
             deliverable_type=deliverable_type,
             meeting_title=meeting_title,
@@ -2089,20 +2158,23 @@ class TerminalWizard:
             if selection.rendering_target_body_characters is not None:
                 target = selection.rendering_target_body_characters
                 summary(
-                    f"  正文目标长度（输入控制参数）: {target:,} 字符；"
-                    f"允许范围 {target * 4 // 5:,}–{target * 6 // 5:,} 字符，"
+                    f"  建议正文长度（软性参考，非硬性限制；不保证达到）: {target:,} 字符；"
                     "参考文献与独立附录不计",
-                    f"  Target body length (input control): {target:,} characters; allowed range {target * 4 // 5:,}–{target * 6 // 5:,}; references and separate appendices excluded",
+                    f"  Suggested body length (advisory, not enforced or guaranteed): {target:,} characters; references and separate appendices excluded",
                 )
         if literature_report and selection.literature_target_body_characters is not None:
             target = selection.literature_target_body_characters
             summary(
-                f"  报告正文目标长度（输入控制参数）: {target:,} 个非空白字符；"
-                f"参考范围 {target * 4 // 5:,}–{target * 6 // 5:,}；"
+                f"  建议报告正文长度（软性参考，非硬性限制；不保证达到）: {target:,} 个非空白字符；"
                 "参考文献与独立附录不计",
-                f"  Target report body length (input control): {target:,} non-whitespace characters; reference range {target * 4 // 5:,}–{target * 6 // 5:,}; references and separate appendices excluded",
+                f"  Suggested report body length (advisory, not enforced or guaranteed): {target:,} non-whitespace characters; references and separate appendices excluded",
             )
         summary(f"  供应商: {', '.join(selection.providers)}", f"  Providers: {', '.join(selection.providers)}")
+        if selection.model_concurrency_limit is not None:
+            summary(
+                f"  每模型同时在途调用上限（输入控制参数）: {selection.model_concurrency_limit} 路",
+                f"  Simultaneous-call cap per model (input control): {selection.model_concurrency_limit}",
+            )
         if selection.meeting_type != MeetingType.RESEARCH:
             if selection.meeting_type == MeetingType.SCHOLARLY_RENDERING:
                 reviewer_union = set(selection.rendering_science_models) | set(
@@ -2121,11 +2193,21 @@ class TerminalWizard:
                 self._print(f"  Chair reasoning effort: {selection.chair_reasoning_effort.value}")
             if fast_report and selection.writer_model is not None:
                 summary(f"  学术主笔: {selection.writer_model[0]}:{selection.writer_model[1]}", f"  Academic writer: {selection.writer_model[0]}:{selection.writer_model[1]}")
-                summary(f"  模块拆分提议模型: {len(selection.fast_planner_models)} 个；并行提出匿名方案后由主笔定稿",
-                        f"  Module-split proposers: {len(selection.fast_planner_models)}; anonymous parallel proposals before Writer synthesis")
+                if selection.fast_planner_models:
+                    summary(f"  模块拆分: {len(selection.fast_planner_models)} 个模型先行协作提议，再由主笔定稿",
+                            f"  Module split: {len(selection.fast_planner_models)} models propose plans before Writer synthesis")
+                else:
+                    summary("  模块拆分: 已跳过多人协作；由学术主笔独立完成",
+                            "  Module split: multi-model collaboration skipped; Writer plans independently")
             if not fast_report:
-                summary("  独立代表提交最大并行: " + ("开启 · 每模型最多 4 次在途调用" if selection.maximum_parallelism else "关闭"),
-                        "  Maximum independent submission parallelism: " + ("on · up to 4 in-flight calls per model" if selection.maximum_parallelism else "off"))
+                if selection.model_concurrency_limit is not None:
+                    summary(
+                        f"  独立代表提交并行上限: 每模型 {selection.model_concurrency_limit} 路同时在途调用",
+                        f"  Independent submission cap: {selection.model_concurrency_limit} simultaneous calls per model",
+                    )
+                else:
+                    summary("  独立代表提交最大并行: " + ("开启 · 每模型最多 4 次在途调用" if selection.maximum_parallelism else "关闭"),
+                            "  Maximum independent submission parallelism: " + ("on · up to 4 in-flight calls per model" if selection.maximum_parallelism else "off"))
             if selection.meeting_type == MeetingType.DELIBERATION and not fast_report:
                 relaxed = selection.decision_rigor == DecisionRigor.RELAXED
                 summary("  决策严谨度: " + ("宽松 · 原 3/4 高门槛改为过半" if relaxed else "严格 · 沿用原门槛"),
@@ -2279,6 +2361,9 @@ def assert_models_were_discovered(selection: StartupSelection, catalog: list[Mod
 
 
 def validate_noninteractive_selection(selection: StartupSelection, config: EnsembleConfig) -> None:
+    if (selection.model_concurrency_limit is not None
+            and not 1 <= selection.model_concurrency_limit <= 16):
+        raise ValueError("model concurrency limit must be between 1 and 16")
     if not selection.providers:
         raise ValueError("at least one --provider is required")
     if (
@@ -2294,10 +2379,10 @@ def validate_noninteractive_selection(selection: StartupSelection, config: Ensem
         validate_reference_paths(selection.human_reference_paths)
     if selection.escalation_email is not None:
         validate_email_address(selection.escalation_email)
-    configured = {pid for pid, provider in config.providers.items() if provider.enabled}
+    configured = set(config.providers)
     unknown = set(selection.providers) - configured
     if unknown:
-        raise ValueError(f"unknown or disabled providers: {', '.join(sorted(unknown))}")
+        raise ValueError(f"unknown or unconfigured providers: {', '.join(sorted(unknown))}")
     selected_providers = set(selection.providers)
     model_providers = {
         provider
@@ -2406,8 +2491,8 @@ def validate_noninteractive_selection(selection: StartupSelection, config: Ensem
             raise ValueError("fast literature meetings need at least two distinct reviewer models")
         if all(model == selection.writer_model for model in selection.models):
             raise ValueError("at least one reviewer model must differ from the Writer")
-        if not 2 <= len(selection.fast_planner_models) <= 3:
-            raise ValueError("fast literature meetings need two or three split-proposal models")
+        if selection.fast_planner_models and not 2 <= len(selection.fast_planner_models) <= 3:
+            raise ValueError("fast literature meetings may use no split-proposal models or two to three")
         if len(set(selection.fast_planner_models)) != len(selection.fast_planner_models):
             raise ValueError("split-proposal models must be distinct")
     elif selection.fast_planner_models:
@@ -2580,6 +2665,10 @@ def start_meeting(
     concurrency_limits: dict[tuple[str, str], int] = {}
     concurrency_sources: dict[tuple[str, str], str] = {}
     for provider_id, model_id in selected_runtime_models:
+        if selection.model_concurrency_limit is not None:
+            concurrency_limits[(provider_id, model_id)] = selection.model_concurrency_limit
+            concurrency_sources[(provider_id, model_id)] = "HUMAN_INITIALIZATION_OVERRIDE"
+            continue
         if selection.maximum_parallelism and (
             selection.deliverable_type == DeliverableType.LITERATURE_REVIEW
             or (provider_id, model_id) in reviewer_models
@@ -2723,8 +2812,9 @@ def start_meeting(
                 "liveliness_1_to_5": selection.literature_liveliness,
                 "signposting_1_to_5": selection.literature_signposting or 4,
                 "target_body_characters": selection.literature_target_body_characters,
+                **({"target_length_policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED"}
+                   if selection.literature_target_body_characters is not None else {}),
                 "fact_first_writing": selection.fact_first_writing,
-                "length_tolerance_fraction": 0.2 if selection.literature_target_body_characters is not None else None,
             }, indent=2, ensure_ascii=False),
         )
     return repo

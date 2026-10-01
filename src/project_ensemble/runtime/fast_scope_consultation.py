@@ -257,12 +257,21 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
         )
         print(_ui(f"\n┌─ {issue.context.get('module_id', '')} · 范围问题 {index}/{len(items)} ──",
                   f"\n┌─ {issue.context.get('module_id', '')} · scope item {index}/{len(items)} ──"), file=output)
+        print(_ui(
+            f"状态：前 {index - 1} 条决定已保存；本条尚未决定。全部 {len(items)} 条处理后仍须在总览提交，现有批准范围暂不变。",
+            f"Status: {index - 1} earlier decisions saved; this item is undecided. The approved scope stays in force until all {len(items)} items are submitted together.",
+        ), file=output, flush=True)
         print(_ui("问题：", "Question: ") + item["question"], file=output)
         proposed = item["proposal"]
         advice = None
         advice_path = repo.root / _record_path(issue.issue_id, index, "writer_advice")
         if not proposed and (engine is not None or advice_path.is_file()):
             try:
+                if not advice_path.is_file():
+                    print(_ui(
+                        "正在取得学术主笔对本条的非约束建议；此时无需输入，返回后会显示对照与选项……",
+                        "Obtaining the writer's non-binding advice for this item; no input is needed yet. The comparison and choices will follow…",
+                    ), file=output, flush=True)
                 advice = _writer_scope_advice(repo, issue, index, item, approved,
                                               engine=engine, max_output_tokens=max_output_tokens)
                 proposed = (advice.new_scope if advice.decision == "CHANGE" else
@@ -277,7 +286,22 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
         suggested_decision = (advice.decision if advice is not None else
                               "CHANGE" if item["proposal"] else None)
         suggested_scope = (advice.new_scope if advice is not None else item["proposal"])
-        _side_by_side(old_scope, proposed, output=output)
+        right_heading = (
+            _ui("主笔解释（建议维持；非裁定）", "Writer's explanation (keep; non-binding)")
+            if advice is not None and advice.decision == "KEEP" else
+            _ui("拟议变更（尚未批准）", "Proposed change (not approved)")
+            if suggested_decision == "CHANGE" else
+            _ui("待裁定事项（暂无修改稿）", "Open item (no proposed change)")
+        )
+        _side_by_side(
+            old_scope, proposed, output=output,
+            left_heading=_ui("已批准范围（当前有效）", "Approved scope (currently in force)"),
+            right_heading=right_heading,
+        )
+        print(_ui(
+            "右栏是主笔的非约束解释或提案，不会自动改变范围；请按下方选项决定本条。",
+            "The right column is non-binding advice or a proposal; it does not change the scope. Decide this item below.",
+        ), file=output)
         if not delegated:
             while True:
                 print(_ui("1. 修改范围（输入具体改动）  2. 不修改，维持已批准范围  3. 交学术主笔裁定",
@@ -287,13 +311,10 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                               "4. Already covered by the previous item; do not add scope twice"), file=output)
                     print(_ui("u. 撤回上一条决定并重新回答",
                               "u. Withdraw the previous answer and answer it again"), file=output)
-                if suggested_decision:
+                if suggested_decision == "CHANGE":
                     print(_ui(
-                        "5. 直接采纳主笔建议（维持已批准范围）" if suggested_decision == "KEEP"
-                        else "5. 直接采纳右栏拟议范围（无须重新输入）",
-                        "5. Accept the writer's suggestion (keep approved scope)"
-                        if suggested_decision == "KEEP"
-                        else "5. Accept the proposed scope shown on the right (no retyping)",
+                        "5. 直接采纳右栏拟议范围（无须重新输入）",
+                        "5. Accept the proposed scope shown on the right (no retyping)",
                     ), file=output)
                 try:
                     choice = input_fn(_ui(
@@ -314,7 +335,7 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                         max_output_tokens=max_output_tokens,
                     )
                 allowed = {"1", "2", "3"} | ({"4"} if index > 1 else set())
-                if suggested_decision:
+                if suggested_decision == "CHANGE":
                     allowed.add("5")
                 if choice == "1" or (choice not in allowed and len(choice) >= 6
                                      and not choice.isdigit()):
@@ -353,29 +374,27 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                     decision = {"item_number": index, "question": item["question"],
                                 "decision": "KEEP", "new_scope": None,
                                 "authority": "HUMAN", "rationale": "人类决定维持已批准范围"}
-                elif choice == "5" and suggested_decision:
-                    if suggested_decision == "CHANGE":
-                        assert suggested_scope
-                        excluded = approved.get("excluded_scope") or []
-                        if any(str(term).strip() and str(term).strip() in suggested_scope
-                               for term in excluded):
-                            print(_ui("提醒：拟议文字涉及原排除项，请确认是否有意扩大范围。",
-                                      "Note: this proposal mentions an excluded topic; check whether you intend to expand scope."), file=output)
-                        try:
-                            confirm = input_fn(_ui("确认直接采纳右栏拟议范围？[y/N]: ",
-                                                   "Accept the proposed scope on the right? [y/N]: ")).strip().lower()
-                        except (EOFError, KeyboardInterrupt):
-                            return False
-                        if confirm not in {"y", "yes"}:
-                            print(_ui("未保存本次建议；请重新选择。",
-                                      "The suggestion was not saved; choose again."), file=output)
-                            continue
+                elif choice == "5" and suggested_decision == "CHANGE":
+                    assert suggested_scope
+                    excluded = approved.get("excluded_scope") or []
+                    if any(str(term).strip() and str(term).strip() in suggested_scope
+                           for term in excluded):
+                        print(_ui("提醒：拟议文字涉及原排除项，请确认是否有意扩大范围。",
+                                  "Note: this proposal mentions an excluded topic; check whether you intend to expand scope."), file=output)
+                    try:
+                        confirm = input_fn(_ui("确认直接采纳右栏拟议范围？[y/N]: ",
+                                               "Accept the proposed scope on the right? [y/N]: ")).strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        return False
+                    if confirm not in {"y", "yes"}:
+                        print(_ui("未保存本次建议；请重新选择。",
+                                  "The suggestion was not saved; choose again."), file=output)
+                        continue
                     decision = {"item_number": index, "question": item["question"],
                                 "decision": suggested_decision,
                                 "new_scope": suggested_scope if suggested_decision == "CHANGE" else None,
                                 "authority": "HUMAN",
-                                "rationale": "人类直接采纳主笔建议" if advice is not None
-                                else "人类直接采纳右栏拟议范围"}
+                                "rationale": "人类直接采纳右栏拟议范围"}
                 elif choice == "4":
                     previous = _effective_decision_path(repo, issue.issue_id, index - 1)
                     if previous is None:

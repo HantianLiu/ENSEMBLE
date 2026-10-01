@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from project_ensemble.research.documents import (
     DocumentFetcher, HttpDocumentFetcher, is_access_blocked_document,
 )
-from project_ensemble.research.pdf_warnings import capture_duplicate_pdf_length_warnings
+from project_ensemble.research.pdf_warnings import capture_recoverable_pdf_warnings
 from project_ensemble.research.retrievers import TavilyRetriever, coerce_retrieval_result
 from project_ensemble.storage.meeting import MeetingRepository
 
@@ -388,7 +388,7 @@ class SourceReader:
 
                 pages = []
                 page_errors = []
-                with capture_duplicate_pdf_length_warnings() as pdf_warnings:
+                with capture_recoverable_pdf_warnings() as pdf_warnings:
                     reader = PdfReader(io.BytesIO(content))
                     for index in range(min(len(reader.pages), 300)):
                         try:
@@ -408,6 +408,13 @@ class SourceReader:
                 record["pdf_broken_cmap_line_count"] = pdf_warnings.broken_cmap_line_count
                 if pdf_warnings.first_broken_cmap_line:
                     record["pdf_first_broken_cmap_line"] = pdf_warnings.first_broken_cmap_line
+                record["pdf_wrong_pointing_object_warning_count"] = (
+                    pdf_warnings.wrong_pointing_object_count
+                )
+                if pdf_warnings.first_wrong_pointing_object:
+                    record["pdf_first_wrong_pointing_object_warning"] = (
+                        pdf_warnings.first_wrong_pointing_object
+                    )
                 if page_errors:
                     record["pdf_page_read_errors"] = page_errors
                 pages.sort(key=lambda item: (-_score(item[1], terms), item[0]))
@@ -417,7 +424,8 @@ class SourceReader:
                 ]
                 record["extraction_note"] = "PDF 文本抽取可能遗漏公式、表格或扫描图像。"
                 if (pdf_warnings.duplicate_length_count
-                        or pdf_warnings.broken_cmap_line_count or page_errors):
+                        or pdf_warnings.broken_cmap_line_count
+                        or pdf_warnings.wrong_pointing_object_count or page_errors):
                     record["extraction_note"] += " PDF 结构异常；重要论断须复核原页。"
             else:
                 text = content.decode("utf-8-sig", errors="replace")

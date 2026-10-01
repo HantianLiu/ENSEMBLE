@@ -1,0 +1,12 @@
+finding_id: D-01
+audit_case: A-XXXX
+author: AUDITOR_ID
+
+observation: ""
+evidence:
+  - meeting_id: ""
+    reference: ""
+
+confidence: 0.0
+possible_interpretation: ""
+needs_more_data: false

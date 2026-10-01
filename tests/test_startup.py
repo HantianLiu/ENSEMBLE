@@ -105,7 +105,7 @@ def test_terminal_wizard_collects_required_inputs(monkeypatch, tmp_path):
         ]
     )
     output = io.StringIO()
-    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=output).collect(config(tmp_path))
+    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=output).collect(config(tmp_path))
     assert selection.meeting_type == MeetingType.DELIBERATION
     assert selection.providers == ("fake",)
     assert selection.models == (("fake", "m1"),)
@@ -213,7 +213,7 @@ def test_terminal_wizard_freezes_relaxed_high_threshold_choice(monkeypatch, tmp_
         "Investigate a bounded task", "", "1", "y",
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(config(tmp_path))
     assert selection.decision_rigor == DecisionRigor.RELAXED
     repo = start_meeting(
@@ -249,7 +249,7 @@ def test_terminal_wizard_offers_research_only_meeting(monkeypatch, tmp_path):
         ]
     )
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(config(tmp_path))
     assert selection.meeting_type == MeetingType.RESEARCH
     assert selection.models == ()
@@ -272,7 +272,9 @@ def test_terminal_wizard_can_choose_tavily_for_openalex_daily_quota(monkeypatch,
     ])
     selection = TerminalWizard(
         input_fn=lambda prompt: (
-            "2" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)
+            "2" if prompt.startswith("选择 1–2；回车默认等待") else (
+                "" if prompt.startswith("每个模型最多同时调用多少次") else next(answers)
+            )
         ), output=io.StringIO(),
     ).collect(cfg)
     assert selection.openalex_quota_policy == "tavily"
@@ -305,7 +307,7 @@ def test_research_claim_can_be_developed_with_preparatory_chair(monkeypatch, tmp
         "", "1", "y",  # no email; Technician disabled; confirm meeting
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(config(tmp_path), prompt_for_claim_dialogue=True)
     assert selection.chair_model is None  # The temporary advisor is not a formal Chair.
     assert selection.task_description.startswith("截至 2025 年")
@@ -332,7 +334,7 @@ def test_research_claim_dialogue_can_fall_back_to_direct_input(monkeypatch, tmp_
         "人工直接确认的命题。", "", "1", "y",
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(config(tmp_path), prompt_for_claim_dialogue=True)
     assert selection.task_description == "人工直接确认的命题。"
     assert selection.prompt_development is None
@@ -349,7 +351,7 @@ def test_terminal_wizard_accepts_fifty_openalex_results_but_rejects_higher_value
     ])
     output = io.StringIO()
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=output
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=output
     ).collect(config(tmp_path))
     assert selection.openalex_max_results_per_query == 50
     assert output.getvalue().count("请输入 1–50 的整数") == 2
@@ -373,7 +375,7 @@ def test_terminal_wizard_offers_derived_literature_review(monkeypatch, tmp_path)
     ])
     output = io.StringIO()
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=output
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=output
     ).collect(config(tmp_path), prompt_for_literature_dialogue=True)
     assert selection.meeting_type == MeetingType.DELIBERATION
     assert selection.deliverable_type == DeliverableType.LITERATURE_REVIEW
@@ -406,11 +408,11 @@ def test_derived_literature_review_can_use_fast_flow(monkeypatch, tmp_path):
     source.mkdir()
     monkeypatch.setattr(TerminalWizard, "_choose_source_meeting", lambda self, cfg: str(source))
     answers = iter([
-        "2", "1", "1", "1,2", "1", "1", "1", "1,2", "1", "1", "", "",
+        "2", "1", "1", "1,2", "1", "1", "1", "1", "1,2", "1", "1", "", "",
         "1", "调查一个有界的问题", "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)),
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)),
         output=io.StringIO(),
     ).collect(config(tmp_path))
     assert selection.parent_meeting_path == str(source)
@@ -449,7 +451,7 @@ def test_literature_startup_can_refine_full_task_with_selected_chair(monkeypatch
         "", "1", "y",  # email, Technician disabled, confirmation
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(config(tmp_path), prompt_for_literature_dialogue=True)
     assert selection.deliverable_type == DeliverableType.LITERATURE_REVIEW
     assert selection.chair_model == ("fake", "m1")
@@ -490,7 +492,7 @@ def test_deliberation_can_refine_its_brief_without_starting_a_vote(monkeypatch, 
         "2", "比较两种方案的风险与可行性。", "1",  # dialogue, initial brief, confirm draft
         "3", "", "1", "y",  # English document, email, Technician off, final confirmation
     ])
-    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()).collect(
+    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()).collect(
         config(tmp_path), prompt_for_deliberation_dialogue=True,
     )
     assert selection.meeting_type == MeetingType.DELIBERATION
@@ -558,7 +560,7 @@ def test_terminal_wizard_offers_from_scratch_literature_review(monkeypatch, tmp_
         "从零形成完整文献调研报告", "1", "", "3", "3", "4", "30000", "1", "", "1", "y",
     ])
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(config(tmp_path))
     assert selection.meeting_type == MeetingType.DELIBERATION
     assert selection.deliverable_type == DeliverableType.LITERATURE_REVIEW
@@ -579,11 +581,11 @@ def test_simple_literature_flow_does_not_offer_deliberation_chair_dialogue(monke
         ],
     )
     answers = iter([
-        "1", "1", "1", "1", "1,2", "1", "1", "1", "1,2", "1", "1", "", "",
+        "1", "1", "1", "1", "1,2", "1", "1", "1", "1", "1,2", "1", "1", "", "",
         "调查一个有界的问题", "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
     ])
     output = io.StringIO()
-    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=output).collect(
+    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=output).collect(
         config(tmp_path), prompt_for_literature_dialogue=True,
         prompt_for_deliberation_dialogue=True,
     )
@@ -617,10 +619,10 @@ def test_simple_literature_direct_brief_gets_model_proposed_title(monkeypatch, t
         lambda *_args, **_kwargs: {"fake": Writer()},
     )
     answers = iter([
-        "1", "1", "1", "1", "1,2", "1", "1", "1", "1,2", "1", "1", "", "",
+        "1", "1", "1", "1", "1,2", "1", "1", "1", "1", "1,2", "1", "1", "", "",
         "比较各国疫苗质量控制策略。", "", "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
     ])
-    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()).collect(
+    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()).collect(
         config(tmp_path), prompt_for_literature_dialogue=True, prompt_for_title=True,
     )
     assert selection.task_description == "比较各国疫苗质量控制策略。"
@@ -658,12 +660,12 @@ def test_simple_literature_preparatory_chair_dialogue_preserves_formal_roles(mon
         lambda *_args, **_kwargs: {"fake": Advisor()},
     )
     answers = iter([
-        "1", "1", "2", "1", "1,2", "1", "1", "1", "1,2", "1", "1", "", "",
+        "1", "1", "2", "1", "1,2", "1", "1", "1", "1", "1,2", "1", "1", "", "",
         "2", "2", "1", "希望比较各国疫苗质量控制策略。\n还要核对原始法规文本。", "1", "",
         "1", "", "3", "3", "4", "10000", "1", "", "1", "y",
     ])
     output = io.StringIO()
-    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=output).collect(
+    selection = TerminalWizard(input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=output).collect(
         config(tmp_path), prompt_for_literature_dialogue=True, prompt_for_title=True,
     )
     assert selection.task_description.startswith("比较各国疫苗质量控制策略")
@@ -753,7 +755,7 @@ def test_terminal_wizard_collects_scholarly_rendering_configuration(
         ]
     )
     selection = TerminalWizard(
-        input_fn=lambda prompt: ("" if prompt.startswith("选择 1–2；回车默认等待") else next(answers)), output=io.StringIO()
+        input_fn=lambda prompt: ("" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次")) else next(answers)), output=io.StringIO()
     ).collect(
         config(tmp_path),
         parent_meeting_path=str(source.resolve()) if direct_continuation else None,
@@ -922,6 +924,25 @@ def test_provider_picker_blank_selects_all_options():
     assert "直接回车选择全部" in prompts[0]
 
 
+def test_configured_provider_discovery_ignores_legacy_enabled_flag(monkeypatch, tmp_path):
+    cfg = config(tmp_path)
+    cfg.providers["fake"].enabled = False
+    seen = {}
+
+    class Adapter:
+        def list_models(self):
+            return [ModelDescriptor(provider_id="fake", model_id="m1")]
+
+    def build(selected, require_keys=True):
+        seen["enabled"] = selected.providers["fake"].enabled
+        return {"fake": Adapter()}
+
+    monkeypatch.setattr("project_ensemble.startup.build_adapters", build)
+    assert [model.model_id for model in discover_models(cfg, ["fake"])] == ["m1"]
+    assert seen["enabled"] is True
+    assert cfg.providers["fake"].enabled is False
+
+
 def test_discovery_uses_configured_selectable_models_in_config_order(monkeypatch, tmp_path):
     cfg = config(tmp_path)
     cfg.providers["fake"].selectable_models = ["m2", "m1"]
@@ -979,7 +1000,8 @@ def test_literature_start_freezes_reader_writing_preferences(tmp_path):
     assert frozen == {
         "language": "fr", "full_abstract": True, "section_abstracts": False,
         "segmentation_1_to_5": 4, "liveliness_1_to_5": 2, "signposting_1_to_5": 4,
-        "target_body_characters": 42000, "length_tolerance_fraction": 0.2,
+        "target_body_characters": 42000,
+        "target_length_policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
         "fact_first_writing": True,
     }
 
@@ -1148,6 +1170,30 @@ def test_maximum_parallelism_freezes_four_in_flight_calls_per_representative_mod
         manifest["model_concurrency_sources"][f"fake:m{index}"] == "HUMAN_MAX_PARALLEL_4"
         for index in (1, 2, 3)
     )
+
+
+def test_initial_model_concurrency_override_applies_to_all_selected_models(tmp_path):
+    cfg = config(tmp_path)
+    selection = StartupSelection(
+        meeting_type=MeetingType.DELIBERATION,
+        providers=("fake",),
+        models=(("fake", "m1"), ("fake", "m2")),
+        chair_model=("fake", "chair"),
+        task_description="task",
+        escalation_email=None,
+        maximum_parallelism=True,
+        model_concurrency_limit=2,
+    )
+    repo = start_meeting(
+        cfg, selection, governance_docs=tmp_path, output_directory=tmp_path / "workspace"
+    )
+    manifest = json.loads((repo.root / "identity_private/meeting_manifest.json").read_text())
+    assert manifest["model_concurrency_limits"] == {
+        "fake:m1": 2, "fake:m2": 2, "fake:chair": 2,
+    }
+    assert set(manifest["model_concurrency_sources"].values()) == {
+        "HUMAN_INITIALIZATION_OVERRIDE"
+    }
 
 
 def test_start_persists_chinese_task_as_utf8(tmp_path):

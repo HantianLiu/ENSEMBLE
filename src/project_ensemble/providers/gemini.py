@@ -7,7 +7,9 @@ import httpx
 from project_ensemble.domain import GenerationRequest, GenerationResponse, ModelDescriptor
 from project_ensemble.errors import PermanentProviderError, TransientProviderError
 from project_ensemble.providers.base import ProviderAdapter, StreamProgressCallback
-from project_ensemble.providers.http import checked_json, checked_status
+from project_ensemble.providers.http import (
+    checked_json, checked_status, interruptible_stream_lines, interruptible_stream_open,
+)
 from project_ensemble.providers.sanitize import without_hidden_reasoning
 
 
@@ -42,15 +44,16 @@ class GeminiAdapter(ProviderAdapter):
             raise TransientProviderError(str(exc)) from exc
 
     @contextmanager
-    def _stream_request(self, suffix: str, **kwargs):
+    def _stream_request(self, suffix: str, *, on_progress=None, **kwargs):
         try:
             with httpx.Client(timeout=self.timeout_seconds) as client:
-                with client.stream(
+                stream = client.stream(
                     "POST",
                     f"{self.base_url}/{suffix.lstrip('/')}",
                     headers=self.headers,
                     **kwargs,
-                ) as response:
+                )
+                with interruptible_stream_open(stream, on_progress) as response:
                     yield response
         except httpx.TransportError as exc:
             raise TransientProviderError(str(exc)) from exc
@@ -157,11 +160,11 @@ class GeminiAdapter(ProviderAdapter):
         finish_reason: str | None = None
         saw_event = False
         suffix = f"models/{request.model_id}:streamGenerateContent"
-        with self._stream_request(suffix, params={"alt": "sse"}, json=payload) as response:
+        with self._stream_request(suffix, params={"alt": "sse"}, json=payload, on_progress=on_progress) as response:
             checked_status(response)
             if on_progress is not None:
                 on_progress("connected", 0, 0)
-            for line in response.iter_lines():
+            for line in interruptible_stream_lines(response, on_progress):
                 stripped = line.strip()
                 if not stripped or stripped.startswith("event:"):
                     continue

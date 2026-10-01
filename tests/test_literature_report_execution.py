@@ -131,6 +131,53 @@ def test_assembly_omits_unbacked_unresolved_item_without_blocking(tmp_path, monk
     assert json.loads(records[0].read_text(encoding="utf-8"))["item"] == missing
 
 
+def test_assembly_renders_known_citations_added_in_unresolved_appendix(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    packet_id = "RP-SUPPORTED"
+    citation_id = "C00001-00001"
+    source = EvidenceSource(
+        source_id="SOURCE-1", title="A relevant review", publication_year=2024,
+        url="https://example.org/review", evidence_use_class=EvidenceUseClass.REVIEW,
+    )
+    repo.docs.write_once(
+        "public/literature_report/modules/RM-01/research/chapter_citation_catalog.json",
+        json.dumps({"sources": [{"citation_id": citation_id, "packet_ids": [packet_id],
+                                 "doi": None, "url": source.url}]}),
+    )
+    draft_path = "public/literature_report/modules/RM-01/drafts/test.json"
+    repo.docs.write_once(draft_path, json.dumps({
+        "title": "Evidence", "body_markdown": "Supported statement.",
+        "short_summary": "Brief summary.", "cited_packet_ids": [],
+        "unresolved_ids": [packet_id],
+    }, ensure_ascii=False))
+    synthesis_path = "public/literature_report/synthesis/test.json"
+    repo.docs.write_once(synthesis_path, json.dumps({
+        "title": "Test report", "abstract": "", "introduction": "", "methods": "",
+        "cross_module_synthesis": "", "conclusion": "", "cited_packet_ids": [],
+    }, ensure_ascii=False))
+    runner = LiteratureReportExecutionRunner(
+        repo=repo,
+        engine=MeetingEngine(repo=repo, adapters={"fake": ExecutionAdapter()}, notifier=NoopNotifier()),
+        governance_docs="docs/governance", research_desk=FakeResearchDesk(),
+    )
+    monkeypatch.setattr(
+        runner, "_load_packet",
+        lambda _packet_id: SimpleNamespace(
+            unresolved_questions=[f"Question retained for review [{citation_id}]."],
+            sources=[source],
+        ),
+    )
+
+    report = runner._assemble_report_markdown(
+        None, [{"module_id": "RM-01", "status": "ADOPTED", "draft_path": draft_path}],
+        repo.root / synthesis_path, footnotes=[],
+    )
+
+    assert f"Question retained for review [1]." in report
+    assert "A relevant review" in report
+    assert citation_id not in report
+
+
 def test_glossary_queries_share_the_first_round_six_question_limit():
     submission = ModuleQuestionSubmission(
         questions=["本章核心研究问题？"],
@@ -678,6 +725,27 @@ def test_internal_identifier_lint_does_not_reject_ordinary_scholarly_identifiers
     ]
 
 
+def test_reader_prose_prompt_separates_workflow_language_from_scholarly_terms():
+    from project_ensemble.orchestration.literature_style import (
+        LITERATURE_WRITING_RULES, READER_PROSE_LEXICON_RULES,
+    )
+
+    assert "不得照抄提示词" in READER_PROSE_LEXICON_RULES
+    assert "不要把多个逻辑关系压成名词链" in READER_PROSE_LEXICON_RULES
+    assert "题名级" in READER_PROSE_LEXICON_RULES
+    assert "记账" in READER_PROSE_LEXICON_RULES
+    assert "不是审查记录的转述者" in READER_PROSE_LEXICON_RULES
+    assert "段落围绕一个主要问题组织" in READER_PROSE_LEXICON_RULES
+    assert "句数和句长随论证需要变化" in READER_PROSE_LEXICON_RULES
+    assert "相变中的冻结" in READER_PROSE_LEXICON_RULES
+    assert "C00007-XXXX" in READER_PROSE_LEXICON_RULES
+    assert "熵账" in READER_PROSE_LEXICON_RULES
+    assert "禁止空泛的自我介绍、写作过程说明和目录预告" in READER_PROSE_LEXICON_RULES
+    assert "不得把来源定义冲突写成‘原文矛盾、本文统一处理’" in READER_PROSE_LEXICON_RULES
+    assert "你是把经过核对的研究内容写给读者" not in LITERATURE_WRITING_RULES
+    assert not leaked_internal_identifiers("相变发生冻结；该证据只能从题名确认。")
+
+
 def test_reader_report_replaces_module_handles_even_with_unicode_dashes():
     original = "RM-01 与 RM–02 相互参照；RM-xx 尚待确认。"
     repaired, trace = replace_reader_module_ids(
@@ -781,6 +849,20 @@ def test_chinese_grouped_temporary_citations_never_reach_reader_text():
             "遗漏 [C00001-00099；C00001-00100]。", {},
             chapter_citation_map={"C00001-00099": 1},
         )
+
+
+def test_mixed_bracket_groups_render_temporary_citations_without_leaking_ids():
+    render = LiteratureReportExecutionRunner._render_packet_citations
+    mapping = {"C00001-00036": 39, "C00001-00045": 40}
+
+    assert render(
+        "Sources [C00001-00036, [40], C00001-00045].", {},
+        chapter_citation_map=mapping,
+    ) == "Sources [39, 40]."
+    assert render(
+        "Paired [C00001-00036 对 [40], C00001-00045].", {},
+        chapter_citation_map=mapping,
+    ) == "Paired [[39] 对 [40], [40]]."
 
 
 def test_assembly_maps_bare_catalog_ids_without_changing_frozen_trace(tmp_path, monkeypatch):

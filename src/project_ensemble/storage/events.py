@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import fcntl
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,17 +36,37 @@ class HashChainEventLog:
 
     def append(self, event_type: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
         with self._append_lock:
-            body = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "event_type": event_type,
-                "actor": actor,
-                "payload": payload,
-                "prev_hash": self._last_hash(),
-            }
-            body["event_hash"] = hashlib.sha256(_canonical(body)).hexdigest()
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(body, ensure_ascii=False, sort_keys=True) + "\n")
-            return body
+            # Multiple repository instances can share one meeting in a single
+            # process, and NFS may expose an append before its line is complete.
+            # Lock a separate stable inode across the read-last-hash/write pair.
+            lock_path = self.path.with_name(self.path.name + ".append.lock")
+            with lock_path.open("a+", encoding="utf-8") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    for attempt in range(3):
+                        try:
+                            previous_hash = self._last_hash()
+                            break
+                        except json.JSONDecodeError as exc:
+                            if attempt == 2:
+                                raise EventChainError(
+                                    "event log remains incomplete after bounded rereads"
+                                ) from exc
+                            time.sleep(0.05 * (attempt + 1))
+                    body = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "event_type": event_type,
+                        "actor": actor,
+                        "payload": payload,
+                        "prev_hash": previous_hash,
+                    }
+                    body["event_hash"] = hashlib.sha256(_canonical(body)).hexdigest()
+                    with self.path.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(body, ensure_ascii=False, sort_keys=True) + "\n")
+                        f.flush()
+                    return body
+                finally:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
     def verify(self) -> bool:
         prev = GENESIS

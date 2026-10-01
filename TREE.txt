@@ -1,4 +1,4 @@
-Project_ENSEMBLE v0.7.0
+历史目录快照：Project_ENSEMBLE v0.7.0（非当前发行包清单）
 ├── README.md                         # 安装、配置、运行与架构概览
 ├── api.md                            # 命令行与 Python 接口说明
 ├── CONTRIBUTING.md                   # 开发与测试约定

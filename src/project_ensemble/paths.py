@@ -40,6 +40,7 @@ def bundled_historical_governance_docs() -> tuple[Path, ...]:
     """Locate archived governance packages without relaxing frozen digest checks."""
 
     archive_names = (
+        "governance_frozen_2026_09_30_v071",
         "governance_legacy_2026_09_23",
         "governance_frozen_2026_09_24_pre_replan",
     )

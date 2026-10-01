@@ -1,5 +1,5 @@
 [project]
-# @package resolves to the immutable governance files shipped with v0.7.0 and
+# @package resolves to the immutable governance files shipped with v0.7.1 and
 # works from any current directory after installation.
 governance_docs = "@package"
 

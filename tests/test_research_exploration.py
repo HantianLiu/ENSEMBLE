@@ -84,6 +84,14 @@ def test_exploratory_answer_reads_original_before_synthesis(tmp_path):
         "The reviewed method measures" in path.read_text(encoding="utf-8")
         for path in exchanges
     )
+    exploration_calls = [json.loads(path.read_text(encoding="utf-8")) for path in exchanges]
+    exploration_calls = [item for item in exploration_calls
+                         if item.get("stage", "").startswith("research_exploration_answer:")]
+    assert exploration_calls
+    assert all("结构化结果的自由文本表达规则" in item["request"]["system_text"]
+               for item in exploration_calls)
+    assert all("规划权限边界" in item["request"]["system_text"]
+               for item in exploration_calls)
 
 
 class ExplorationAdapter(PlanningAdapter):

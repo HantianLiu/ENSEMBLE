@@ -21,7 +21,8 @@ from project_ensemble.orchestration.supplementary_rendering import (
 )
 from project_ensemble.config import load_config
 from project_ensemble.user_settings import (
-    configure_interactively, ensure_user_config, interface_language, user_config_path,
+    configure_interactively, ensure_user_config, interface_language,
+    removed_provider_ids, user_config_path,
 )
 from project_ensemble.interface_language import ui_label, ui_text
 from project_ensemble.domain import (
@@ -101,6 +102,7 @@ from project_ensemble.startup import (
     StartupWizardCancelled,
     TerminalWizard,
     assert_models_were_discovered,
+    config_with_providers_enabled,
     discover_models,
     enable_utf8_terminal_erase,
     natural_meeting_title,
@@ -154,6 +156,65 @@ def _config_path(value: str | None, repo: MeetingRepository | None = None) -> st
     if bundled.is_file():
         return str(bundled)
     raise ValueError("configuration path required: use --config or set ENSEMBLE_CONFIG")
+
+
+def _load_config(path: str | Path):
+    """Load the selected runtime config plus user-managed provider additions.
+
+    User-managed provider entries contribute custom APIs and override matching
+    provider IDs from the selected config. This makes Settings edits and newly
+    added providers available even when ENSEMBLE_CONFIG points at a project
+    config, without changing that file's meeting/research policies.
+    """
+    config = load_config(path)
+    if not hasattr(config, "providers"):
+        return config
+    user_path = user_config_path()
+    try:
+        same_file = user_path.resolve() == Path(path).expanduser().resolve()
+    except OSError:
+        same_file = False
+    if not same_file and user_path.is_file():
+        user_config = load_config(user_path)
+        providers = dict(config.providers)
+        providers.update(user_config.providers)
+    else:
+        providers = dict(config.providers)
+    removed = removed_provider_ids()
+    if removed:
+        providers = {provider_id: provider for provider_id, provider in providers.items()
+                     if provider_id not in removed}
+    config = config.model_copy(update={"providers": providers})
+    return config
+
+
+def _meeting_runtime_provider_ids(repo: MeetingRepository) -> set[str]:
+    """Providers needed by this meeting, including runtime replacements."""
+    provider_ids = set()
+    for participant in meeting_participant_ids(repo):
+        try:
+            provider_id, _ = current_runtime_for(repo, participant)
+        except (ValueError, FileNotFoundError):
+            continue
+        provider_ids.add(provider_id)
+    return provider_ids
+
+
+def _build_meeting_adapters(cfg, repo: MeetingRepository, *, require_keys: bool = True):
+    """Build only providers actually used by this meeting, regardless of legacy enabled flags."""
+    provider_ids = _meeting_runtime_provider_ids(repo)
+    meeting_cfg = config_with_providers_enabled(cfg, sorted(provider_ids))
+    meeting_cfg = meeting_cfg.model_copy(update={
+        "providers": {provider_id: meeting_cfg.providers[provider_id] for provider_id in provider_ids}
+    })
+    return build_adapters(meeting_cfg, require_keys=require_keys)
+
+
+def _load_adapter_for_provider(cfg, provider_id: str):
+    """Build one provider adapter in memory without enabling it globally."""
+    provider_cfg = config_with_providers_enabled(cfg, [provider_id])
+    selected = provider_cfg.model_copy(update={"providers": {provider_id: provider_cfg.providers[provider_id]}})
+    return build_adapters(selected, require_keys=True)[provider_id]
 
 
 _RESUMABLE_COMMANDS = {"run-general", "run-report", "run-research", "run-render", "run-audit"}
@@ -275,7 +336,7 @@ def _recover_unhandled_failure(args, exc: Exception) -> int:
         if choice == "2":
             try:
                 repo = MeetingRepository(root)
-                cfg = load_config(_config_path(getattr(args, "config", None), repo))
+                cfg = _load_config(_config_path(getattr(args, "config", None), repo))
                 replacement = _interactive_model_replacement(repo=repo, cfg=cfg)
             except (KeyboardInterrupt, EOFError):
                 return 130
@@ -409,7 +470,7 @@ def _configured_input_context_budgets(*, repo, cfg, adapters, progress=None):
 
 
 def cmd_doctor(args) -> int:
-    cfg = load_config(_config_path(args.config))
+    cfg = _load_config(_config_path(args.config))
     problems = []
     for pid, p in cfg.providers.items():
         if p.enabled and p.kind != "codex_subscription" and (
@@ -456,22 +517,21 @@ def cmd_doctor(args) -> int:
             f"{cfg.research.openalex_api_key_env} or configure openalex_api_key_file"
         )
     for provider_id, provider in cfg.providers.items():
-        if provider.enabled:
-            levels = ", ".join(provider.reasoning_effort_map) or "default only"
-            print(f"Reasoning control {provider_id}: {levels}")
-            default_concurrency = provider.max_concurrent_requests or 1
-            source = "configured" if provider.max_concurrent_requests else "safe fallback"
-            overrides = ", ".join(
-                f"{model}={limit}"
-                for model, limit in sorted(
-                    provider.model_max_concurrent_requests.items()
-                )
+        levels = ", ".join(provider.reasoning_effort_map) or "default only"
+        print(f"Reasoning control {provider_id}: {levels}")
+        default_concurrency = provider.max_concurrent_requests or 1
+        source = "configured" if provider.max_concurrent_requests else "safe fallback"
+        overrides = ", ".join(
+            f"{model}={limit}"
+            for model, limit in sorted(
+                provider.model_max_concurrent_requests.items()
             )
-            print(
-                f"Concurrency control {provider_id}: default={default_concurrency} "
-                f"({source})"
-                + (f"; model overrides: {overrides}" if overrides else "")
-            )
+        )
+        print(
+            f"Concurrency control {provider_id}: default={default_concurrency} "
+            f"({source})"
+            + (f"; model overrides: {overrides}" if overrides else "")
+        )
     if problems:
         print("Configuration parsed. Problems found:")
         for x in problems:
@@ -486,8 +546,8 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_discover(args) -> int:
-    cfg = load_config(_config_path(args.config))
-    provider_ids = [provider_id for provider_id, provider in cfg.providers.items() if provider.enabled]
+    cfg = _load_config(_config_path(args.config))
+    provider_ids = list(cfg.providers)
     out = [model.model_dump() for model in discover_models(cfg, provider_ids)]
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
@@ -510,7 +570,7 @@ def cmd_migrate_v06(args) -> int:
     if args.dry_run:
         print("v0.6 会议迁移预检通过；源会议未修改，目标目录未创建。")
     else:
-        print(f"v0.6 会议副本已升级至 v0.7.0：{report['destination_path']}")
+        print(f"v0.6 会议副本已升级至 v{__version__}：{report['destination_path']}")
         print(f"恢复命令：ensemble open {shlex.quote(report['destination_path'])}")
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0
@@ -685,6 +745,7 @@ def _interactive_start_arguments(args, *, cfg_path: str | None = None):
         "literature_target_body_characters": None,
         "report_palette": None,
         "maximum_parallelism": None,
+        "model_concurrency_limit": None,
         "literature_writing_policy": None,
         "writer_model": None,
         "writer_reasoning_effort": None,
@@ -737,13 +798,16 @@ def _assert_meeting_runtime_compatible(
         repo.docs.read_text("identity_private/meeting_manifest.json")
     )
     frozen_software = manifest.get("software_version")
-    if frozen_software != __version__:
+    # 0.7.3 continues the 0.7.1 meeting runtime/governance format. Keep this
+    # allowlist explicit; the frozen governance digest below remains the
+    # semantic compatibility check.
+    if not _meeting_software_version_supported(frozen_software):
         raise PolicyNotConfiguredError(
             "MEETING_SOFTWARE_VERSION_MISMATCH: "
             f"meeting requires {frozen_software or 'an unversioned legacy runtime'}, "
             f"but this command is {__version__}. Resume it with the compatible installation "
             "or copy a v0.6 meeting with 'ensemble migrate-v06 --help'; "
-            "v0.7.0 will not migrate it in place."
+            f"v{__version__} will not migrate it in place."
         )
     current_digest = directory_digest(Path(governance_docs))
     if current_digest != manifest.get("governance_digest"):
@@ -752,6 +816,14 @@ def _assert_meeting_runtime_compatible(
             "not match the immutable package pinned at initialization. Restore the exact "
             "package or create a successor meeting."
         )
+
+
+def _meeting_software_version_supported(frozen_version: str | None) -> bool:
+    """Return whether this runtime can execute a frozen meeting format."""
+
+    # 0.7.3 continues the 0.7.1 meeting runtime/governance format. Keep this
+    # allowlist explicit: the 0.7.0 line belongs to ensemble-old.
+    return frozen_version in {__version__, "0.7.1"}
 
 
 def _meeting_governance_docs(repo: MeetingRepository, configured: str | Path) -> str | Path:
@@ -782,7 +854,7 @@ def _resume_selected_meeting(args, repo: MeetingRepository, cfg) -> int:
     private_manifest = repo.root / "identity_private/meeting_manifest.json"
     if private_manifest.is_file():
         frozen_version = json.loads(private_manifest.read_text(encoding="utf-8")).get("software_version")
-        if frozen_version and frozen_version != __version__:
+        if frozen_version and not _meeting_software_version_supported(frozen_version):
             if not str(frozen_version).startswith("0.6"):
                 raise PolicyNotConfiguredError(
                     f"该会议冻结于软件版本 {frozen_version}；当前 v{__version__} 无兼容执行器。"
@@ -1047,7 +1119,7 @@ def _continue_completed_meeting_once(args, repo: MeetingRepository, cfg, wizard:
 
 def _open_meeting(args, path: Path) -> int | None:
     repo = MeetingRepository(path)
-    cfg = load_config(_config_path(getattr(args, "config", None), repo))
+    cfg = _load_config(_config_path(getattr(args, "config", None), repo))
     args._resume_cmd = _resume_kind(repo)
     args._resume_meeting = str(repo.root)
     # A direct resume already knows its path; no global index write is needed.
@@ -1174,8 +1246,7 @@ def _additional_formats_interactive(repo: MeetingRepository, wizard: TerminalWiz
 
 
 def _chair_qa_interactive(repo: MeetingRepository, cfg, wizard: TerminalWizard) -> int:
-    enabled = [name for name, provider in cfg.providers.items() if provider.enabled]
-    catalog = discover_models(cfg, enabled)
+    catalog = discover_models(cfg, list(cfg.providers))
     options = [(f"{item.provider_id}:{item.model_id}", "主席问答模型") for item in catalog]
     if not options:
         raise ValueError("配置中的供应商没有返回可用模型，无法开启主席问答")
@@ -1185,7 +1256,7 @@ def _chair_qa_interactive(repo: MeetingRepository, cfg, wizard: TerminalWizard) 
         "设置主席问答的推理强度",
         wizard._reasoning_options(cfg, ((provider_id, model_id),)),
     ))
-    adapters = build_adapters(cfg)
+    adapters = {provider_id: _load_adapter_for_provider(cfg, provider_id)}
     configured = cfg.providers[provider_id]
     effective_effort = effort if configured.supports_reasoning_effort(model_id, effort.value) else ReasoningEffort.DEFAULT
     service = ChairQuestionService(
@@ -1215,8 +1286,7 @@ def _chair_qa_interactive(repo: MeetingRepository, cfg, wizard: TerminalWizard) 
 
 
 def _chair_corrigendum_interactive(repo: MeetingRepository, cfg, wizard: TerminalWizard) -> int:
-    enabled = [name for name, provider in cfg.providers.items() if provider.enabled]
-    catalog = discover_models(cfg, enabled)
+    catalog = discover_models(cfg, list(cfg.providers))
     options = [(f"{item.provider_id}:{item.model_id}", "会后勘误主席") for item in catalog]
     if not options:
         raise ValueError("配置中的供应商没有返回可用模型，无法开启勘误对话")
@@ -1232,7 +1302,7 @@ def _chair_corrigendum_interactive(repo: MeetingRepository, cfg, wizard: Termina
         else ReasoningEffort.DEFAULT
     )
     service = ChairCorrigendumService(
-        root=repo.root, adapter=build_adapters(cfg)[provider_id],
+        root=repo.root, adapter=_load_adapter_for_provider(cfg, provider_id),
         model_id=model_id, reasoning_effort=effective_effort,
     )
     print(_ui(f"勘误对话已开启 · 当前完整文稿：{service.current()}", f"Corrigendum dialogue started · current full draft: {service.current()}"))
@@ -1276,16 +1346,16 @@ def cmd_retypeset(args) -> int:
 
 def cmd_corrigendum_edit(args) -> int:
     """Apply one explicit Human-directed Chair edit to a completed report."""
-    cfg = load_config(_config_path(args.config))
+    cfg = _load_config(_config_path(args.config))
     provider_id, model_id = _provider_model(args.model)
-    if provider_id not in cfg.providers or not cfg.providers[provider_id].enabled:
-        raise ValueError(f"未启用的勘误主席供应商：{provider_id}")
+    if provider_id not in cfg.providers:
+        raise ValueError(f"未配置的勘误主席供应商：{provider_id}")
     effort = ReasoningEffort(args.reasoning_effort)
     configured = cfg.providers[provider_id]
     if not configured.supports_reasoning_effort(model_id, effort.value):
         effort = ReasoningEffort.DEFAULT
     service = ChairCorrigendumService(
-        root=Path(args.meeting), adapter=build_adapters(cfg)[provider_id],
+        root=Path(args.meeting), adapter=_load_adapter_for_provider(cfg, provider_id),
         model_id=model_id, reasoning_effort=effort,
     )
     result = service.converse(args.instruction, edit=True)
@@ -1360,10 +1430,10 @@ def cmd_home(args) -> int:
                 print("尚未配置模型供应商；请先进入“设置 → 模型供应商”。")
                 continue
             cfg_path = str(ensure_user_config())
-        cfg = load_config(cfg_path)
+        cfg = _load_config(cfg_path)
         if choice == "new":
-            if not any(p.enabled for p in cfg.providers.values()):
-                print("没有已启用的模型供应商；请先进入设置。")
+            if not cfg.providers:
+                print("没有已配置的模型供应商；请先进入设置。")
                 continue
             start_args = _interactive_start_arguments(args, cfg_path=str(cfg.source_path))
             start_args._from_home = True
@@ -1522,7 +1592,7 @@ def cmd_open(args) -> int:
             direct = candidate.resolve()
             break
     if direct is None:
-        cfg = load_config(_config_path(args.config))
+        cfg = _load_config(_config_path(args.config))
         direct = resolve_indexed_meeting(args.selector, cfg.source_path)
         if direct is None:
             direct = next(
@@ -1535,7 +1605,7 @@ def cmd_open(args) -> int:
 
 
 def cmd_start(args) -> int:
-    cfg = load_config(_config_path(args.config))
+    cfg = _load_config(_config_path(args.config))
     if args.non_interactive:
         meeting_type = MeetingType(args.meeting_type) if args.meeting_type else None
         if args.technician_reasoning_effort and not args.technician_model:
@@ -1613,6 +1683,7 @@ def cmd_start(args) -> int:
                 args.maximum_parallelism if args.maximum_parallelism is not None
                 else args.deliverable_type == DeliverableType.LITERATURE_REVIEW.value
             ),
+            model_concurrency_limit=args.model_concurrency_limit,
             openalex_quota_policy=args.openalex_quota_policy or "wait",
             deliverable_type=DeliverableType(
                 args.deliverable_type
@@ -1812,7 +1883,16 @@ def cmd_start(args) -> int:
             + ("宽松；原 3/4 高门槛改为全体合格投票者过半" if relaxed else "严格；沿用原 3/4 高门槛")
         )
     if private_manifest.get("maximum_parallelism"):
-        print("并行提示：每个代表模型最多 4 次同时在途调用；速度可能提高，缓存命中率可能下降。")
+        chosen_cap = selection.model_concurrency_limit
+        print(
+            "并行提示："
+            + (
+                f"本次所选模型的同时在途调用上限由人类设为 {chosen_cap} 路；"
+                if chosen_cap is not None else
+                "默认每个代表模型最多 4 路同时在途调用；"
+            )
+            + "并发越高，缓存命中率可能越低。"
+        )
     concurrency_limits = private_manifest.get("model_concurrency_limits", {})
     concurrency_sources = private_manifest.get("model_concurrency_sources", {})
     if concurrency_limits:
@@ -1916,7 +1996,7 @@ def _run_research_only_locked(*, repo: MeetingRepository, cfg) -> dict:
 
     progress = ConsoleProgressReporter(meeting_root=repo.root)
     with repo.exclusive_run_lock():
-        adapters = build_adapters(cfg, require_keys=True)
+        adapters = _build_meeting_adapters(cfg, repo, require_keys=True)
         output_token_budgets = _configured_output_token_budgets(
             repo=repo, cfg=cfg, adapters=adapters, progress=progress
         )
@@ -1934,6 +2014,7 @@ def _run_research_only_locked(*, repo: MeetingRepository, cfg) -> dict:
             input_context_budgets=input_context_budgets,
             configured_concurrency_limits=_meeting_concurrency_limits(repo, cfg),
         )
+        _install_live_batch_controls(progress=progress, repo=repo, cfg=cfg, engine=engine)
         progress.start_control_listener()
         task = json.loads(repo.docs.read_text("public/task.json"))["description"]
         progress.status(
@@ -2012,7 +2093,7 @@ def _ensure_research_only_links(
 
 def cmd_request_human(args) -> int:
     repo = MeetingRepository(args.meeting)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     service = HumanEscalationService(repo, build_email_notifier(cfg.notifications.email))
     notification_enabled = cfg.notifications.email.enabled and repo.escalation_email() is not None
     event = service.request(reason_code=args.reason_code, summary=args.summary)
@@ -2047,7 +2128,7 @@ def cmd_science_authority(args) -> int:
         None,
     )
     if direct is None:
-        cfg = load_config(_config_path(args.config))
+        cfg = _load_config(_config_path(args.config))
         direct = resolve_indexed_meeting(args.meeting, cfg.source_path)
     if direct is None:
         raise ValueError(f"没有找到会议 {args.meeting!r}；请提供会议 ID 或完整目录")
@@ -2562,7 +2643,7 @@ def _run_general_locked(*, repo, cfg, governance_docs=None, max_output_tokens=No
         )
     notifier = build_email_notifier(cfg.notifications.email)
     progress = ConsoleProgressReporter(meeting_root=repo.root) if show_progress else NullProgressReporter()
-    adapters = build_adapters(cfg, require_keys=True)
+    adapters = _build_meeting_adapters(cfg, repo, require_keys=True)
     output_token_budgets = {}
     if max_output_tokens is None:
         output_token_budgets = _configured_output_token_budgets(
@@ -2643,7 +2724,7 @@ def cmd_run_general(args) -> int:
     repo = MeetingRepository(args.meeting)
     if _has_frozen_readability_failure(repo):
         return _open_meeting(args, repo.root)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     register_meeting(repo.root, cfg.source_path)
     if _uses_legacy_runtime(repo):
         return _resume_selected_meeting(args, repo, cfg)
@@ -2716,7 +2797,7 @@ def _run_literature_report_locked(
 ):
     with repo.exclusive_run_lock():
         progress = ConsoleProgressReporter(meeting_root=repo.root) if show_progress else NullProgressReporter()
-        adapters = build_adapters(cfg, require_keys=True)
+        adapters = _build_meeting_adapters(cfg, repo, require_keys=True)
         output_token_budgets = {}
         if max_output_tokens is None:
             output_token_budgets = _configured_output_token_budgets(
@@ -2765,6 +2846,7 @@ def _run_literature_report_locked(
                 governance_docs=governance_docs or cfg.project.governance_docs,
                 research_desk=research_desk, max_output_tokens=max_output_tokens,
             )
+            progress.live_fast_runner = execution
             def refresh_runtime_budgets() -> None:
                 engine.input_context_budgets = _configured_input_context_budgets(
                     repo=repo, cfg=cfg, adapters=adapters,
@@ -2919,7 +3001,7 @@ def cmd_run_report(args) -> int:
     repo = MeetingRepository(args.meeting)
     if _has_frozen_readability_failure(repo):
         return _open_meeting(args, repo.root)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     register_meeting(repo.root, cfg.source_path)
     if _uses_legacy_runtime(repo):
         return _resume_selected_meeting(args, repo, cfg)
@@ -2980,7 +3062,7 @@ def _run_scholarly_rendering_locked(
 ):
     with repo.exclusive_run_lock():
         progress = ConsoleProgressReporter(meeting_root=repo.root) if show_progress else NullProgressReporter()
-        adapters = build_adapters(cfg, require_keys=True)
+        adapters = _build_meeting_adapters(cfg, repo, require_keys=True)
         output_token_budgets = {}
         if max_output_tokens is None:
             output_token_budgets = _configured_output_token_budgets(
@@ -3089,7 +3171,7 @@ def _run_scholarly_rendering_locked(
 
 def cmd_run_render(args) -> int:
     repo = MeetingRepository(args.meeting)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     register_meeting(repo.root, cfg.source_path)
     if _uses_legacy_runtime(repo):
         return _resume_selected_meeting(args, repo, cfg)
@@ -3120,7 +3202,7 @@ def cmd_reassemble_render(args) -> int:
         None,
     )
     if direct is None:
-        cfg = load_config(_config_path(args.config))
+        cfg = _load_config(_config_path(args.config))
         direct = resolve_indexed_meeting(args.meeting, cfg.source_path)
     if direct is None:
         raise ValueError(f"没有找到会议 {args.meeting!r}；请提供会议 ID 或完整目录")
@@ -3133,7 +3215,7 @@ def cmd_reassemble_render(args) -> int:
 
 def cmd_run_research(args) -> int:
     repo = MeetingRepository(args.meeting)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     register_meeting(repo.root, cfg.source_path)
     if _uses_legacy_runtime(repo):
         return _resume_selected_meeting(args, repo, cfg)
@@ -3151,7 +3233,7 @@ def cmd_run_research(args) -> int:
 
 def cmd_research_claim(args) -> int:
     repo = MeetingRepository(args.meeting)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     progress = ConsoleProgressReporter(meeting_root=repo.root)
     with repo.exclusive_run_lock():
         incomplete_rounds = ResearchRoundRunner.incomplete_round_ids(repo)
@@ -3161,7 +3243,7 @@ def cmd_research_claim(args) -> int:
                 f"incomplete ({', '.join(incomplete_rounds)}); resume the meeting with "
                 "ensemble run-general first"
             )
-        adapters = build_adapters(cfg, require_keys=True)
+        adapters = _build_meeting_adapters(cfg, repo, require_keys=True)
         output_token_budgets = _configured_output_token_budgets(
             repo=repo, cfg=cfg, adapters=adapters, progress=progress
         )
@@ -3239,11 +3321,11 @@ def cmd_replace_model(args) -> int:
     """Record a future-only model handoff for one meeting participant."""
 
     repo = MeetingRepository(args.meeting)
-    cfg = load_config(_config_path(args.config, repo))
+    cfg = _load_config(_config_path(args.config, repo))
     provider_id, model_id = args.model
     provider = cfg.providers.get(provider_id)
-    if provider is None or not provider.enabled:
-        raise ValueError(f"provider {provider_id!r} is not enabled in the meeting configuration")
+    if provider is None:
+        raise ValueError(f"provider {provider_id!r} is not configured in the meeting configuration")
     if provider.selectable_models is not None and model_id not in provider.selectable_models:
         raise ValueError(
             f"model {provider_id}:{model_id} is not in that provider's configured selectable_models"
@@ -3324,7 +3406,12 @@ def _install_live_batch_controls(*, progress, repo, cfg, engine) -> None:
             return fallback
 
     def apply_changes() -> None:
-        changes = _interactive_model_replacement(repo=repo, cfg=cfg, deferred=True) or []
+        changes = _interactive_model_replacement(
+            repo=repo, cfg=cfg, deferred=True,
+        ) or []
+        if any(item.get("kind") == "force_stop" for item in changes):
+            progress.force_stop_active_calls()
+            return
         for item in changes:
             if item.get("kind") == "runtime_control":
                 from project_ensemble.runtime.run_controls import record_run_control
@@ -3332,8 +3419,16 @@ def _install_live_batch_controls(*, progress, repo, cfg, engine) -> None:
                     repo, kind=item["control_kind"], target=item["target"],
                     value=item["value"], reason=item["reason"],
                 )
+                if item["control_kind"] == "research_parallelism":
+                    fast_runner = getattr(progress, "live_fast_runner", None)
+                    if fast_runner is not None:
+                        fast_runner.research_max_concurrent_claim_groups = int(item["value"])
             else:
                 target = (item["provider_id"], item["model_id"])
+                if item["provider_id"] not in engine.adapters:
+                    engine.adapters[item["provider_id"]] = _load_adapter_for_provider(
+                        cfg, item["provider_id"]
+                    )
                 if current_runtime_for(repo, item["participant_id"]) != target:
                     ModelReplacementService(repo).replace(**item)
         if changes:
@@ -3341,6 +3436,10 @@ def _install_live_batch_controls(*, progress, repo, cfg, engine) -> None:
             engine.input_context_budgets = _configured_input_context_budgets(
                 repo=repo, cfg=cfg, adapters=engine.adapters,
             )
+            if getattr(engine, "max_output_tokens", None) is None:
+                engine.output_token_budgets = _configured_output_token_budgets(
+                    repo=repo, cfg=cfg, adapters=engine.adapters,
+                )
             desk = getattr(progress, "live_research_desk", None)
             if desk is not None:
                 desk.update_model_concurrency_limit(
@@ -3363,6 +3462,7 @@ def _install_live_batch_controls(*, progress, repo, cfg, engine) -> None:
 
     progress.live_runtime_key = runtime_key
     progress.live_batch_control_callback = apply_changes
+    progress.immediate_control_callback = apply_changes
 
 
 def _interactive_research_desk_fallback(
@@ -3371,7 +3471,8 @@ def _interactive_research_desk_fallback(
     """Retry one missing question or select a future-only Research Desk model."""
 
     from project_ensemble.orchestration.literature_fast import (
-        FastResearchDeskFailure, request_fast_research_rollback,
+        DEFAULT_FAST_SEARCH_REPAIR_DIRECTION, FastResearchDeskFailure,
+        request_fast_research_rollback,
     )
     from project_ensemble.runtime.research_fallbacks import ResearchFallbacks
 
@@ -3383,13 +3484,39 @@ def _interactive_research_desk_fallback(
         or str(cause).startswith("OpenAlex retrieval failed:")
         or str(cause).startswith("OpenAlex search HTTP 400")
     )
+    openalex_500 = search_failure and "OpenAlex retrieval failed: HTTP 500" in str(cause)
+    openalex_400 = search_failure and (
+        isinstance(cause, OpenAlexQueryRejected) or "HTTP 400" in str(cause)
+    )
     def manual_rollback() -> bool:
         if not failed_question:
             return False
-        direction = terminal_input(_ui(
-            "给 Research Desk 一句排障方向，用于重拟本题四类检索式（回车取消）: ",
-            "Give Research Desk one direction for replanning this item's four searches (Enter cancels): ",
-        )).strip()
+        if openalex_400:
+            print(_ui(
+                "建议修复方向：保留原问题和四类证据方向；缩短检索式，优先使用核心主题词、短语及明确的 OR 词形变体；"
+                "避免复杂嵌套布尔结构，默认不用 * 或 ? 通配符，仅在必要且后端支持时使用。",
+                "Suggested repair: preserve the claim and all four evidence directions; shorten queries to core topical terms,"
+                " phrases, and explicit OR variants; avoid nested Boolean logic and do not use * or ? wildcards by default."
+                " Use them only when necessary and supported by the backend.",
+            ), file=output)
+            repair_choice = terminal_input(_ui(
+                "回车采用这条预设；输入 c 自定义排障方向；b 返回: ",
+                "Enter accepts this preset; c lets you customize it; b returns: ",
+            )).strip().lower()
+            if repair_choice in {"", "1"}:
+                direction = DEFAULT_FAST_SEARCH_REPAIR_DIRECTION
+            elif repair_choice == "c":
+                direction = terminal_input(_ui(
+                    "输入补充或替代方向（回车取消）: ",
+                    "Enter an alternative direction (Enter cancels): ",
+                )).strip()
+            else:
+                return False
+        else:
+            direction = terminal_input(_ui(
+                "给 Research Desk 一句排障方向，用于重拟本题四类检索式（回车取消）: ",
+                "Give Research Desk one direction for replanning this item's four searches (Enter cancels): ",
+            )).strip()
         if not direction:
             return False
         from contextlib import nullcontext
@@ -3418,9 +3545,22 @@ def _interactive_research_desk_fallback(
         print(_ui(f"│ 失败类型：{type(cause).__name__}；{str(cause)[:200]}", f"│ Failure type: {type(cause).__name__}; {str(cause)[:200]}"), file=output)
     print(_ui("│ 已完成的核查不会重做；未完成项没有证据结论。", "│ Completed checks are preserved; unfinished items have no evidence conclusion."), file=output)
     if search_failure:
-        print(_ui("│ HTTP 400 会先按保留主题词的简化查询重试；不会因此更换 Research Desk 模型。",
-                  "│ HTTP 400 will first retry with a simpler topical query; the Research Desk model stays unchanged."), file=output)
-        print(_ui("│ 1. 只重新提交未落盘的检索", "│ 1. Retry only the unfinished search"), file=output)
+        if openalex_500:
+            print(_ui("│ HTTP 500 是服务端响应；可能与检索式有关，也可能是服务故障，不能直接归因。",
+                      "│ HTTP 500 is a server response; a query trigger is possible but unconfirmed."), file=output)
+            print(_ui("│ 重复失败后，已配置的 Technician 会只修订本题四类检索式；原问题和原查询保留。",
+                      "│ After repeated failures, the configured Technician revises only this item's four searches."), file=output)
+        else:
+            print(_ui("│ HTTP 400 会先按保留主题词的简化查询重试；不会因此更换 Research Desk 模型。",
+                      "│ HTTP 400 first retries with simpler topical terms; the Research Desk model stays unchanged."), file=output)
+            if openalex_400:
+                print(_ui("│ 若需手动回退，系统提供预设修复方向：精简查询、保留主题词、默认避免通配符。",
+                          "│ Manual rollback offers a preset: shorten queries, retain topic terms, and avoid wildcards by default."), file=output)
+        if openalex_500:
+            print(_ui("│ 学术命题优先 OpenAlex；不会因本次 HTTP 500 自动改用 Tavily。",
+                      "│ Academic claims prefer OpenAlex; this HTTP 500 does not trigger Tavily."), file=output)
+        print(_ui("│ 1. 只重新提交未落盘的检索；优先沿用已落盘的修订检索式",
+                  "│ 1. Retry unfinished item using any saved revised search plan"), file=output)
         print(_ui("│ 2. 保持暂停，稍后处理", "│ 2. Stay paused and decide later"), file=output)
         print(_ui("│ r. 手动回退到本题检索式拟定，并给出排障方向",
                   "│ r. Roll back this item's search plan with a Human direction"), file=output)
@@ -3470,9 +3610,15 @@ def _interactive_research_desk_fallback(
             break
         print(_ui("请输入有效编号。", "Enter a valid number."), file=output)
 
-    provider_ids = [provider_id for provider_id, provider in cfg.providers.items() if provider.enabled]
+    provider_ids = list(cfg.providers)
     try:
-        catalog = discover_models(cfg, provider_ids)
+        catalogs = []
+        for provider_id in provider_ids:
+            try:
+                catalogs.extend(discover_models(cfg, [provider_id]))
+            except Exception as exc:
+                print(_ui(f"供应商 {provider_id} 暂不可用：{exc}", f"Provider {provider_id} is unavailable: {exc}"), file=output)
+        catalog = catalogs
     except Exception as exc:
         print(_ui(f"模型列表查询失败：{exc}。会议保持暂停，可稍后用 replace-model 指定。", f"Model discovery failed: {exc}. Meeting stays paused; use replace-model later."), file=output)
         return False
@@ -3679,11 +3825,11 @@ def _interactive_run_control(*, repo: MeetingRepository, cfg, mode: int,
 
 def _interactive_model_replacement(
     *, repo: MeetingRepository, cfg, deferred: bool = False,
+    allow_force_stop: bool = True,
 ) -> list[dict] | None:
     """Choose a runtime now; a batch scheduler commits it at its safe boundary."""
 
     output = sys.stderr
-    available: list[tuple[str, str]] | None = None
     while True:
         print(_ui("\n┌─ 模型与运行参数 ─────────────────────────────────────────", "\n┌─ Models and runtime controls ─────────────────────────────"), file=output)
         print(_ui("│ 1. 替换某个代表（也可选择 CHAIR / RESEARCH_DESK）", "│ 1. Replace one participant (including CHAIR / RESEARCH_DESK)"), file=output)
@@ -3692,11 +3838,20 @@ def _interactive_model_replacement(
         print(_ui("│ 4. 调整某个模型的同时在途调用上限", "│ 4. Change one model's simultaneous-call cap"), file=output)
         print(_ui("│ 5. 调整某个参与者的推理强度", "│ 5. Change one participant's reasoning effort"), file=output)
         print(_ui("│ 6. 调整 OpenAlex 额度耗尽时是否改用 Tavily", "│ 6. Choose whether Tavily replaces OpenAlex after quota exhaustion"), file=output)
+        if deferred and allow_force_stop:
+            print(_ui("│ 7. 强制中止当前在途模型调用；保留已落盘进度，随后选择替代模型",
+                      "│ 7. Force-stop active calls; keep saved work, then choose a replacement"), file=output)
         print(_ui("│ b. 取消更换，继续会议   q. 安全退出会议", "│ b. Cancel and continue   q. Safely exit meeting"), file=output)
         print("└──────────────────────────────────────────────────────────", file=output)
-        mode_index = _replacement_menu_choice(_ui("选择操作", "Choose action"), 6, output=output)
+        mode_index = _replacement_menu_choice(
+            _ui("选择操作", "Choose action"),
+            7 if deferred and allow_force_stop else 6,
+            output=output,
+        )
         if mode_index is None:
             return [] if deferred else None
+        if deferred and mode_index == 6:
+            return [{"kind": "force_stop"}]
         mode = str(mode_index + 1)
         if mode_index >= 2:
             changed = _interactive_run_control(
@@ -3733,23 +3888,41 @@ def _interactive_model_replacement(
                     break
                 source_model = models[source_index]
             source_label = f"{source_model[0]}:{source_model[1]}"
-            if available is None:
-                provider_ids = [
-                    provider_id for provider_id, provider in cfg.providers.items() if provider.enabled
-                ]
-                print(_ui("\n正在查询已启用供应商的可用模型……", "\nDiscovering available models from enabled providers..."), file=output, flush=True)
-                try:
-                    catalog = discover_models(cfg, provider_ids)
-                except Exception as exc:
-                    print(_ui(f"模型列表查询失败：{exc}；可返回重试或安全退出。", f"Model discovery failed: {exc}; go back to retry or exit safely."), file=output)
+            provider_ids = list(cfg.providers)
+            if not provider_ids:
+                print(_ui("没有已配置的供应商；请先在设置中添加供应商。", "No providers are configured; add one in Settings first."), file=output)
+                continue
+            print(_ui("\n可用于本次切换的已配置供应商：", "\nConfigured providers available for this replacement:"), file=output)
+            for index, candidate_provider in enumerate(provider_ids, start=1):
+                provider_cfg = cfg.providers[candidate_provider]
+                name = provider_cfg.display_name or candidate_provider
+                print(f"  {index}. {name} [{candidate_provider}]", file=output)
+            provider_index = _replacement_menu_choice(
+                _ui("选择目标供应商", "Choose target provider"), len(provider_ids), output=output
+            )
+            if provider_index is None:
+                continue
+            target_provider = provider_ids[provider_index]
+            if target_provider != source_model[0]:
+                confirmed = terminal_input(_ui(
+                    f"将把后续任务内容发送给外部供应商 {target_provider}。确认使用该供应商？[y/N] ",
+                    f"Future task content will be sent to external provider {target_provider}. Confirm? [y/N] ",
+                )).strip().lower()
+                if confirmed not in {"y", "yes", "是"}:
                     continue
-                available = list(dict.fromkeys(
-                    (descriptor.provider_id, descriptor.model_id) for descriptor in catalog
-                ))
-                if not available:
-                    print(_ui("未发现可用目标模型；请检查供应商后再试。", "No target model is available; check provider settings and retry."), file=output)
-                    available = None
-                    continue
+            print(_ui(f"\n正在从 {target_provider} 实时发现模型……", f"\nDiscovering models from {target_provider}…"), file=output, flush=True)
+            try:
+                catalog = discover_models(cfg, [target_provider])
+            except Exception as exc:
+                print(_ui(f"模型列表查询失败：{exc}；可返回重试或选择其他供应商。", f"Model discovery failed: {exc}; retry or choose another provider."), file=output)
+                continue
+            available = list(dict.fromkeys(
+                (descriptor.provider_id, descriptor.model_id) for descriptor in catalog
+            ))
+            available = [model for model in available if model != source_model]
+            if not available:
+                print(_ui("该供应商没有可用的替代模型；请选择其他供应商。", "This provider has no available replacement model; choose another."), file=output)
+                continue
             while True:
                 print(_ui(f"\n替换对象当前为 {source_label}；可用目标模型：", f"\nCurrent model: {source_label}; available targets:"), file=output)
                 for index, model in enumerate(available, start=1):
@@ -3828,7 +4001,7 @@ def _interactive_model_replacement(
             break
 
 
-def main() -> int:
+def _main_impl() -> int:
     enable_utf8_terminal_erase()
     parser = argparse.ArgumentParser(prog="ensemble")
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
@@ -3886,11 +4059,11 @@ def main() -> int:
 
     p = sub.add_parser(
         "migrate-v06",
-        help="copy and validate a v0.6 meeting for v0.7.0 resume",
+        help=f"copy and validate a v0.6 meeting for v{__version__} resume",
     )
     p.add_argument("--meeting", required=True, help="existing v0.6 meeting directory")
     p.add_argument("--output", required=True, help="new directory for the migrated copy")
-    p.add_argument("--config", required=True, help="v0.7.0 configuration file")
+    p.add_argument("--config", required=True, help=f"v{__version__} configuration file")
     p.add_argument("--dry-run", action="store_true", help="read-only compatibility check")
     p.set_defaults(func=cmd_migrate_v06)
 
@@ -3920,7 +4093,7 @@ def main() -> int:
     p.add_argument("--rendering-liveliness", type=int, choices=range(1, 6))
     p.add_argument(
         "--rendering-target-body-characters", type=int,
-        help="scholarly rendering body target; references and standalone appendices excluded; ±20%% tolerance",
+        help="advisory scholarly-rendering body length in characters; not enforced or guaranteed; references and standalone appendices excluded",
     )
     p.add_argument("--literature-language", choices=["zh", "en", "fr"])
     p.add_argument("--report-palette", choices=["ocean", "forest", "plum", "slate"],
@@ -3934,7 +4107,7 @@ def main() -> int:
     p.add_argument("--literature-signposting", type=int, choices=range(1, 6))
     p.add_argument(
         "--literature-target-body-characters", type=int,
-        help="literature review body target in non-whitespace Unicode characters; references and standalone appendices excluded; ±20%% guidance",
+        help="advisory literature-review body length in non-whitespace Unicode characters; not enforced or guaranteed; references and standalone appendices excluded",
     )
     p.add_argument(
         "--rendering-output-format", action="append", choices=["html", "md", "latex", "pdf"]
@@ -3958,7 +4131,7 @@ def main() -> int:
                    help="literature review workflow; fast has one Writer, no Chair, and multiple Librarian reviewers")
     p.add_argument("--writer-reasoning-effort", choices=[x.value for x in ReasoningEffort])
     p.add_argument("--fast-planner-model", action="append", type=_provider_model,
-                   help="fast literature: two or three independent module-split proposers")
+                   help="optional fast-literature module-split proposals; provide two or three models, or omit to let the Writer plan independently")
     p.add_argument("--technician-model", type=_provider_model,
                    help="optional Technician; sends minimal meeting error context to the selected model provider")
     p.add_argument("--technician-reasoning-effort", choices=[x.value for x in ReasoningEffort])
@@ -3971,6 +4144,8 @@ def main() -> int:
                    help="maximum independent Research Desk claim groups in flight; positive integer")
     p.add_argument("--maximum-parallelism", action=argparse.BooleanOptionalAction, default=None,
                    help="up to four concurrent independent representative calls per base model; default on for literature reviews")
+    p.add_argument("--model-concurrency-limit", type=int,
+                   help="initial simultaneous-call cap per selected base model (1–16)")
     p.add_argument("--openalex-quota-policy", choices=("wait", "tavily"),
                    help="on confirmed daily OpenAlex exhaustion: ask Human (wait) or pre-authorize Tavily")
     p.add_argument("--task")
@@ -4180,6 +4355,39 @@ def main() -> int:
                 print(_ui(f"会议进度未主动删除；请重试：{command}",
                           f"Saved meeting progress was not deleted; retry: {command}"), file=sys.stderr)
             return 2
+
+
+def main() -> int:
+    """Restore the caller's terminal even after an unexpected exit path.
+
+    Live progress and the fallback line editor temporarily disable terminal
+    echo. Their local cleanup remains important while ENSEMBLE is running;
+    this process boundary is the final safeguard before returning to a shell.
+    """
+
+    saved_terminal = None
+    try:
+        import termios
+
+        if sys.stdin.isatty():
+            fd = sys.stdin.fileno()
+            saved_terminal = (termios, fd, termios.tcgetattr(fd))
+    except (ImportError, AttributeError, OSError, ValueError):
+        pass
+    try:
+        return _main_impl()
+    finally:
+        try:
+            shutdown_active_control_listeners()
+        except (OSError, ValueError):
+            pass
+        finally:
+            if saved_terminal is not None:
+                tty_module, fd, original = saved_terminal
+                try:
+                    tty_module.tcsetattr(fd, tty_module.TCSANOW, original)
+                except (OSError, ValueError, tty_module.error):
+                    pass
 
 
 if __name__ == "__main__":

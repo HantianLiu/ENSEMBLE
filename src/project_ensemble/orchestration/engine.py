@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import secrets
@@ -16,6 +17,8 @@ from pydantic import BaseModel, ValidationError
 from project_ensemble.domain import GenerationRequest, GenerationResponse, MeetingPhase, ReasoningEffort
 from project_ensemble.errors import (
     EmptyModelOutputError,
+    ForcedModelReplacementRequested,
+    ImmutableWriteError,
     InputContextLimitError,
     OutputLimitReachedError,
     PolicyNotConfiguredError,
@@ -29,7 +32,9 @@ from project_ensemble.orchestration.invocation import RepresentativeInvoker
 from project_ensemble.orchestration.retry_state import MeetingStatus
 from project_ensemble.providers.base import ProviderAdapter
 from project_ensemble.runtime.progress import NullProgressReporter, ProgressReporter
-from project_ensemble.runtime.model_replacements import current_runtime_for, has_runtime_replacement
+from project_ensemble.runtime.model_replacements import (
+    current_runtime_for, has_runtime_replacement, latest_runtime_replacement_at_ns,
+)
 from project_ensemble.runtime.model_fallback_order import ModelFallbackOrderService
 from project_ensemble.runtime.research_fallbacks import ResearchFallbacks
 from project_ensemble.runtime.telemetry import TokenTelemetry, normalize_token_usage
@@ -381,6 +386,14 @@ class MeetingEngine:
         kwargs = {} if sleep is None else {"sleep": sleep}
         sleep_fn = time.sleep if sleep is None else sleep
         stream_reporter = getattr(self.progress, "stream_progress", None)
+        force_check = getattr(self.progress, "raise_if_force_control_requested", None)
+
+        def report_stream(state: str, reasoning_chars: int, content_chars: int) -> None:
+            if callable(force_check):
+                force_check()
+            if state != "heartbeat" and callable(stream_reporter):
+                stream_reporter(participant_id, stage, state, reasoning_chars, content_chars)
+
         telemetry: TokenTelemetry | None = None
         response: GenerationResponse | None = None
         empty_output_retries = self.invoker.max_retries
@@ -395,19 +408,18 @@ class MeetingEngine:
                     adapter,
                     request,
                     self.status,
-                    on_stream_progress=(
-                        None
-                        if not callable(stream_reporter)
-                        else lambda state, reasoning_chars, content_chars: stream_reporter(
-                            participant_id,
-                            stage,
-                            state,
-                            reasoning_chars,
-                            content_chars,
-                        )
-                    ),
+                    on_stream_progress=report_stream,
                     **kwargs,
                 )
+            except ForcedModelReplacementRequested:
+                self.repo.events.append(
+                    "MODEL_CALL_FORCE_STOPPED",
+                    {"meeting_id": self.repo.meeting_id, "participant_id": participant_id,
+                     "provider_id": provider_id, "model_id": model_id, "stage": stage,
+                     "response_recorded": False},
+                    actor="human",
+                )
+                raise
             except RepresentativeUnavailableError:
                 self._raise_if_control_requested()
                 if not getattr(self._recoverable_call_state, "depth", 0):
@@ -585,6 +597,9 @@ class MeetingEngine:
         nonblocking_quality_failure_code: str | None = None,
         repair_guidance: str | None = None,
         repair_diagnostic: Callable[[str], str] | None = None,
+        original_system_text: str | None = None,
+        original_user_text: str | None = None,
+        fresh_attempts_remaining: int = 0,
     ) -> StructuredModel:
         """Validate output and allow two auditable, stage-specific repair attempts."""
         try:
@@ -732,6 +747,53 @@ class MeetingEngine:
                         actor="orchestrator",
                     )
                     return parsed
+                for rejected_stage, rejected_response in (
+                    (stage, response),
+                    (repair_stage, repair),
+                    (second_repair_stage, second_repair),
+                ):
+                    self._quarantine_invalid_response(
+                        participant_id, rejected_stage, rejected_response,
+                        schema_model.__name__, type(repair_error).__name__,
+                    )
+                technician_repair = self._try_technician_schema_repair(
+                    participant_id=participant_id,
+                    stage=stage,
+                    schema_model=schema_model,
+                    original_response=response,
+                    latest_response=second_repair,
+                    validation_error=repair_error,
+                    semantic_requirement=semantic_requirement,
+                    max_output_tokens=max_output_tokens,
+                )
+                if technician_repair is not None:
+                    return technician_repair
+                if (fresh_attempts_remaining > 0 and original_system_text is not None
+                        and original_user_text is not None):
+                    self.progress.info(
+                        f"{participant_id} · 结构修复仍无效；已隔离坏响应，重新生成本任务"
+                    )
+                    fresh_response = self.invoke_participant(
+                        participant_id,
+                        system_text=original_system_text,
+                        user_text=original_user_text,
+                        stage=stage,
+                        max_output_tokens=max_output_tokens,
+                    )
+                    return self.validate_structured_response(
+                        participant_id,
+                        response=fresh_response,
+                        schema_model=schema_model,
+                        stage=stage,
+                        max_output_tokens=max_output_tokens,
+                        semantic_requirement=semantic_requirement,
+                        nonblocking_quality_failure_code=nonblocking_quality_failure_code,
+                        repair_guidance=repair_guidance,
+                        repair_diagnostic=repair_diagnostic,
+                        original_system_text=original_system_text,
+                        original_user_text=original_user_text,
+                        fresh_attempts_remaining=fresh_attempts_remaining - 1,
+                    )
                 if nonblocking_quality_failure_code is not None:
                     self.repo.events.append(
                         "MODEL_OUTPUT_SCHEMA_REPAIR_FAILED_NONBLOCKING",
@@ -767,6 +829,161 @@ class MeetingEngine:
             )
             return parsed
 
+    def _try_technician_schema_repair(
+        self,
+        *,
+        participant_id: str,
+        stage: str,
+        schema_model: type[StructuredModel],
+        original_response: GenerationResponse,
+        latest_response: GenerationResponse,
+        validation_error: Exception,
+        semantic_requirement: str | None,
+        max_output_tokens: int | None,
+    ) -> StructuredModel | None:
+        """Let the meeting Technician fix output structure before resubmitting work.
+
+        The Technician is not allowed to make a substantive decision. Both the
+        original and repaired exchanges remain immutable for later audit.
+        """
+
+        if participant_id == "TECHNICIAN":
+            return None
+        manifest_path = self.repo.root / "identity_private/meeting_manifest.json"
+        if not manifest_path.is_file():
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not manifest.get("technician_model"):
+            return None
+        # A truncated view would invite a fabricated reconstruction. In that
+        # case the original task is regenerated instead of asking for a patch.
+        if len(original_response.text) + len(latest_response.text) > 300_000:
+            self.repo.events.append(
+                "TECHNICIAN_SCHEMA_REPAIR_DECLINED",
+                {"meeting_id": self.repo.meeting_id, "participant_id": participant_id,
+                 "source_stage": stage, "reason": "INPUT_TOO_LARGE"},
+                actor="orchestrator",
+            )
+            return None
+        repair_stage = f"{stage}_technician_schema_repair"
+        system_text = (
+            "You are the meeting's technical output repairer, not a scientific reviewer or author. "
+            "Repair only JSON syntax, schema-invalid field placement, and identifier formatting. "
+            "Preserve every substantive claim, condition, number, citation, conclusion strength, "
+            "and dissent. Do not invent an identifier or dependency. If a descriptive note was put "
+            "in an identifier-only field, move it to an appropriate note field when the schema "
+            "permits; otherwise return an UNREPAIRABLE status object. Never silently discard it. "
+            "Return exactly one JSON object conforming to the target schema, or "
+            '{"repair_status":"UNREPAIRABLE","reason":"..."}. '
+            "Do not modify ENSEMBLE files or code."
+        )
+        user_text = (
+            "TARGET JSON SCHEMA:\n"
+            + json.dumps(schema_model.model_json_schema(), ensure_ascii=False)
+            + "\nSEMANTIC REQUIREMENT:\n"
+            + (semantic_requirement or "Preserve the original substantive content.")
+            + "\nLATEST VALIDATION ERROR:\n"
+            + str(validation_error)
+            + "\nORIGINAL OUTPUT:\n"
+            + original_response.text
+            + "\nLATEST REPAIR OUTPUT:\n"
+            + latest_response.text
+        )
+        self.repo.events.append(
+            "TECHNICIAN_SCHEMA_REPAIR_REQUESTED",
+            {"meeting_id": self.repo.meeting_id, "participant_id": participant_id,
+             "source_stage": stage, "repair_stage": repair_stage,
+             "schema_model": schema_model.__name__},
+            actor="orchestrator",
+        )
+        self.progress.info(f"{participant_id} · 结构修复未通过；交 Technician 处理输出格式")
+        repaired: GenerationResponse | None = None
+        try:
+            repaired = self.find_recorded_response(
+                "TECHNICIAN", system_text=system_text, user_text=user_text,
+                stage=repair_stage,
+            ) or self.invoke_participant(
+                "TECHNICIAN", system_text=system_text, user_text=user_text,
+                stage=repair_stage, max_output_tokens=max_output_tokens,
+            )
+            parsed = parse_json_object(repaired.text)
+            if parsed.get("repair_status") == "UNREPAIRABLE":
+                raise ValueError("Technician reported that lossless schema repair is impossible")
+            result = schema_model.model_validate(parsed)
+            if not self._technician_semantics_preserved(
+                schema_model.__name__, latest_response.text, parsed,
+            ):
+                raise ValueError("Technician changed task content beyond structural repair")
+        except (ProviderError, RepresentativeUnavailableError, InputContextLimitError,
+                OutputLimitReachedError, EmptyModelOutputError, PolicyNotConfiguredError,
+                ValueError, ValidationError, TypeError) as exc:
+            if repaired is not None:
+                self._quarantine_invalid_response(
+                    "TECHNICIAN", repair_stage, repaired,
+                    schema_model.__name__, type(exc).__name__,
+                )
+            self.repo.events.append(
+                "TECHNICIAN_SCHEMA_REPAIR_DECLINED",
+                {"meeting_id": self.repo.meeting_id, "participant_id": participant_id,
+                 "source_stage": stage, "reason": type(exc).__name__},
+                actor="orchestrator",
+            )
+            return None
+        self.repo.events.append(
+            "TECHNICIAN_SCHEMA_REPAIR_SUCCEEDED",
+            {"meeting_id": self.repo.meeting_id, "participant_id": participant_id,
+             "source_stage": stage, "repair_stage": repair_stage,
+             "schema_model": schema_model.__name__},
+            actor="orchestrator",
+        )
+        return result
+
+    @staticmethod
+    def _technician_semantics_preserved(
+        schema_name: str, source_text: str, repaired: dict[str, Any],
+    ) -> bool:
+        """Protect taskbook substance while allowing only dependency-field repair."""
+
+        if schema_name != "FastPlanningTurn":
+            return True
+        try:
+            source = parse_json_object(source_text)
+        except (ValueError, TypeError):
+            # No machine-readable baseline exists; the original and repair
+            # remain auditable, and normal scientific review is still required.
+            return True
+
+        def without_editable_links(value: dict[str, Any]) -> dict[str, Any]:
+            clone = json.loads(json.dumps(value, ensure_ascii=False))
+            taskbook = clone.get("taskbook")
+            outline = taskbook.get("outline") if isinstance(taskbook, dict) else None
+            if isinstance(outline, dict):
+                outline.pop("clustering_notes", None)
+                for module in outline.get("modules", []):
+                    if isinstance(module, dict):
+                        module.pop("cross_module_links", None)
+            return clone
+
+        if without_editable_links(source) != without_editable_links(repaired):
+            return False
+        source_taskbook = source.get("taskbook")
+        repaired_taskbook = repaired.get("taskbook")
+        source_outline = source_taskbook.get("outline") if isinstance(source_taskbook, dict) else None
+        repaired_outline = repaired_taskbook.get("outline") if isinstance(repaired_taskbook, dict) else None
+        source_modules = source_outline.get("modules", []) if isinstance(source_outline, dict) else []
+        repaired_notes = repaired_outline.get("clustering_notes", []) if isinstance(repaired_outline, dict) else []
+        if not isinstance(source_modules, list) or not isinstance(repaired_notes, list):
+            return False
+        notes_text = "\n".join(item for item in repaired_notes if isinstance(item, str))
+        for module in source_modules:
+            if not isinstance(module, dict):
+                continue
+            for link in module.get("cross_module_links", []):
+                if (isinstance(link, str) and not re.search(r"RM-[0-9]{2}", link.upper())
+                        and link not in notes_text):
+                    return False
+        return True
+
     def _schema_repair_temperature(self, participant_id: str) -> float:
         """Choose a provider-legal low-variance setting for lossless JSON repair."""
 
@@ -788,9 +1005,13 @@ class MeetingEngine:
         exchange_root = self.repo.root / "governance_private/provider_exchanges"
         if not exchange_root.exists():
             return None
+        replacement_cutoff_ns = latest_runtime_replacement_at_ns(self.repo, participant_id)
         matches: list[tuple[int, GenerationResponse]] = []
         for path in exchange_root.glob("X-*.json"):
             try:
+                exchange_time_ns = path.stat().st_mtime_ns
+                if exchange_time_ns < replacement_cutoff_ns:
+                    continue
                 record = json.loads(path.read_text(encoding="utf-8"))
                 request = record["request"]
                 recorded_system_text = request["system_text"]
@@ -817,12 +1038,59 @@ class MeetingEngine:
                     # result; retry it under the current output-limit policy.
                     if not response.text.strip():
                         continue
+                    if self._is_quarantined_response(participant_id, stage, response):
+                        continue
                     matches.append(
-                        (path.stat().st_mtime_ns, response)
+                        (exchange_time_ns, response)
                     )
             except (KeyError, OSError, TypeError, ValueError, ValidationError):
                 continue
         return max(matches, key=lambda item: item[0])[1] if matches else None
+
+    def _invalid_response_marker(
+        self, participant_id: str, stage: str, response: GenerationResponse,
+    ) -> Path:
+        identity = json.dumps(
+            [participant_id, stage, response.text], ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return Path("governance_private/invalid_model_outputs") / f"{digest}.json"
+
+    def _is_quarantined_response(
+        self, participant_id: str, stage: str, response: GenerationResponse,
+    ) -> bool:
+        return (self.repo.root / self._invalid_response_marker(
+            participant_id, stage, response,
+        )).exists()
+
+    def _quarantine_invalid_response(
+        self, participant_id: str, stage: str, response: GenerationResponse,
+        schema_name: str, error_type: str,
+    ) -> None:
+        """Keep the audit exchange, but never replay an exhausted bad output."""
+
+        marker = self._invalid_response_marker(participant_id, stage, response)
+        if (self.repo.root / marker).exists():
+            return
+        payload = {
+            "meeting_id": self.repo.meeting_id,
+            "participant_id": participant_id,
+            "stage": stage,
+            "schema_model": schema_name,
+            "error_type": error_type,
+            "response_sha256": marker.stem,
+        }
+        try:
+            self.repo.docs.write_once(marker, json.dumps(payload, ensure_ascii=False, indent=2))
+        except ImmutableWriteError:
+            # Two independent lanes may receive the same malformed payload.
+            # The first durable marker already excludes both from replay.
+            return
+        self.repo.events.append(
+            "INVALID_MODEL_OUTPUT_QUARANTINED",
+            {**payload, "record_path": str(marker)}, actor="orchestrator",
+        )
 
     def _with_inherited_advisory_context(self, system_text: str) -> str:
         """Expose a parent's final document without promoting it to governance."""

@@ -62,6 +62,38 @@ def test_archived_source_hash_mismatch_blocks_supplementary_rendering(tmp_path):
         rendering.render_additional_formats(repo, formats=("html",))
 
 
+def test_supplementary_html_recovers_original_pdf_url_from_retained_evidence(tmp_path):
+    repo, _ = archived_report(tmp_path)
+    (repo.root / "public/final").mkdir(parents=True, exist_ok=True)
+    (repo.root / "public/final/literature_review_publication_manifest.json").write_text(
+        json.dumps({"citation_trace_path": "public/literature_report/citation_trace.json"}),
+        encoding="utf-8",
+    )
+    trace = {"references": [{
+        "reference_number": 1,
+        "source_id": "S-1",
+        "doi": "10.1234/example",
+        "url": "https://publisher.example/article",
+    }]}
+    trace_path = repo.root / "public/literature_report/citation_trace.json"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    packets = repo.root / "public/research/evidence_packets"
+    packets.mkdir(parents=True)
+    (packets / "C1.json").write_text(json.dumps({"sources": [{
+        "source_id": "S-1",
+        "original_document_url": "https://publisher.example/article.pdf",
+    }]}), encoding="utf-8")
+
+    links = rendering._citation_links(repo.root)
+    assert links == {
+        "1": {
+            "source": "https://doi.org/10.1234/example",
+            "pdf": "https://publisher.example/article.pdf",
+        }
+    }
+
+
 def test_old_html_derivative_is_preserved_and_shortcut_points_to_v2(tmp_path):
     repo, source = archived_report(tmp_path)
     old = repo.root / "public/supplementary_rendering" / hashlib.sha256(source.read_bytes()).hexdigest()[:16] / "report.html"

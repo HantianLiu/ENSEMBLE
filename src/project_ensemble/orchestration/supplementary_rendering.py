@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +33,52 @@ _COMPLETE_DOCUMENTS = (
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _citation_links(root: Path) -> dict[str, dict[str, str]]:
+    manifest_path = root / "public/final/literature_review_publication_manifest.json"
+    manifest = {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    trace_path = root / str(manifest.get("citation_trace_path", ""))
+    if not trace_path.is_file() or root not in trace_path.resolve().parents:
+        trace_path = next((root / relative for relative in (
+            "public/literature_report/citation_trace_assembly_v4.json",
+            "public/literature_report/citation_trace_assembly_v3.json",
+            "public/literature_report/citation_trace_assembly_v2.json",
+            "public/literature_report/citation_trace.json",
+        ) if (root / relative).is_file()), root / "__missing_citation_trace__")
+    try:
+        references = json.loads(trace_path.read_text(encoding="utf-8")).get("references", [])
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(references, list):
+        return {}
+    pdf_by_source: dict[str, str] = {}
+    packet_dir = root / "public/research/evidence_packets"
+    if packet_dir.is_dir():
+        for packet_path in packet_dir.glob("*.json"):
+            try:
+                packet = json.loads(packet_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for source in packet.get("sources", []):
+                if isinstance(source, dict) and source.get("source_id") and source.get("original_document_url"):
+                    pdf_by_source.setdefault(str(source["source_id"]), str(source["original_document_url"]))
+    links: dict[str, dict[str, str]] = {}
+    for item in references:
+        if not isinstance(item, dict) or not item.get("reference_number"):
+            continue
+        doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", str(item.get("doi") or ""), flags=re.I)
+        source = f"https://doi.org/{doi}" if doi else str(item.get("url") or "")
+        entry = {"source": source}
+        pdf = pdf_by_source.get(str(item.get("source_id") or ""))
+        if pdf:
+            entry["pdf"] = pdf
+        links[str(item["reference_number"])] = entry
+    return links
 
 
 def _safe_source(root: Path, relative: str | Path) -> Path:
@@ -137,6 +184,7 @@ def render_additional_formats(
                 if format_name == "html":
                     output = render_academic_review_html(
                         markdown, meeting_id=root.name, palette=selected_palette,
+                        reference_links=_citation_links(root),
                     ).encode("utf-8")
                 else:
                     output, font = render_academic_review_pdf(

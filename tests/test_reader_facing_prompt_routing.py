@@ -5,8 +5,10 @@ from project_ensemble.orchestration.literature_report_execution import (
     GlobalEvidenceSummary, LiteratureReportExecutionRunner, ModuleDraft,
     WholeReportSynthesis,
 )
-from project_ensemble.orchestration.literature_fast import FastWholeSynthesis
-from project_ensemble.orchestration.literature_writing_v071 import WriterChapter
+from project_ensemble.orchestration.literature_fast import FastBreadthSearchPlan, FastWholeSynthesis
+from project_ensemble.orchestration.literature_writing_v071 import (
+    ModuleWritingOutline, OutlineBallot, WriterChapter,
+)
 from project_ensemble.orchestration.readability_policy import reader_facing_prose_contract
 from project_ensemble.orchestration.scholarly_rendering import (
     ChairScienceRevision, RenderedSection, RenderingPlan, ScholarlyRenderingRunner,
@@ -39,6 +41,11 @@ def test_reader_contract_uses_named_levels_and_preserves_evidence_boundaries():
     assert '"软物质物理"' in contract
     assert "压缩重复，不压缩异议或不确定性" in contract
     assert "不能藏进注释" in contract
+    assert "不得照抄提示词" in contract
+    assert "题名级" in contract
+    assert "这些词只是在写作规则中用于识别不合适的表达" in contract
+    assert "临床试验注册" in contract
+    assert "尚无研究测量 X" in contract
 
 
 def test_literature_direct_prose_calls_receive_contract_but_evidence_summary_does_not(tmp_path):
@@ -65,6 +72,7 @@ def test_literature_direct_prose_calls_receive_contract_but_evidence_summary_doe
         assert "读者正文写作契约" in call["system_text"]
         assert '"药学"' in call["system_text"]
         assert '"ordinary_level":3' in call["system_text"]
+        assert "不得原样搬入正文" in call["system_text"]
     assert calls[4]["system_text"] == "证据摘要。"
 
 
@@ -83,6 +91,38 @@ def test_legacy_representative_writer_receives_contract(tmp_path):
         public_files=(), user_prefix="撰写导读。",
     )
     assert "读者正文写作契约" in calls[0]["user_text"]
+
+
+def test_planning_structured_calls_receive_scoped_prose_and_authority_rules(tmp_path):
+    public = tmp_path / "public/literature_report"
+    public.mkdir(parents=True)
+    (public / "writing_preferences.json").write_text(
+        json.dumps({"signposting_1_to_5": 3}), encoding="utf-8",
+    )
+    (public / "audience_profile-01.json").write_text(
+        json.dumps({"disciplines": {"统计物理": 2}}), encoding="utf-8",
+    )
+    runner = object.__new__(LiteratureReportExecutionRunner)
+    runner.repo = SimpleNamespace(root=tmp_path)
+    runner.engine, calls = _capture_engine()
+    runner.max_output_tokens = None
+
+    for schema in (FastBreadthSearchPlan, ModuleWritingOutline, OutlineBallot):
+        runner._invoke_service(
+            "WRITER", stage="planning-test", schema=schema,
+            system="原规划权限。", user={"search_queries": ["exact query"]},
+        )
+
+    for call in calls:
+        assert "结构化结果的自由文本表达规则" in call["system_text"]
+        assert "规划权限边界" in call["system_text"]
+        assert "不得决定联网能力" in call["system_text"]
+        assert '"ordinary_level":3' in call["system_text"]
+        assert '"complex_level":4' in call["system_text"]
+        assert '"统计物理"' in call["system_text"]
+        assert "读者正文写作契约" not in call["system_text"]
+        assert '"search_queries"' in call["user_text"]
+        assert '"exact query"' in call["user_text"]
 
 
 def test_scholarly_rendering_prose_and_revisions_receive_contract_only(tmp_path):

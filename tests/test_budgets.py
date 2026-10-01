@@ -2,12 +2,15 @@ import json
 
 from project_ensemble.domain import ModelDescriptor, ReasoningEffort
 from project_ensemble.orchestration.budgets import (
+    add_replacement_input_context_budgets,
+    add_replacement_output_budgets,
     budget_map,
     calculate_token_budget,
     input_context_budget_map,
     load_or_freeze_input_context_budgets,
     load_or_freeze_meeting_budgets,
 )
+from project_ensemble.runtime.model_replacements import ModelReplacementService
 from project_ensemble.storage.meeting import MeetingRepository
 
 
@@ -200,6 +203,50 @@ def test_configured_model_limit_upgrades_old_fallback_without_rewriting_snapshot
         configured_model_limits={("deepseek", "deepseek-flash"): 2000},
     )
     assert input_context_budget_map(resumed) == {("deepseek", "deepseek-flash"): 800}
+
+
+def test_resume_budgets_ignore_superseded_replacement_providers(tmp_path):
+    gov = tmp_path / "gov"
+    gov.mkdir()
+    (gov / "rule.md").write_text("rule")
+    repo = MeetingRepository.create(
+        tmp_path / "ws",
+        selected_models=[("codex", "original")],
+        chair_model=("codex", "original"),
+        governance_docs=gov,
+    )
+    replacements = ModelReplacementService(repo)
+    replacements.replace(
+        participant_id="CHAIR", provider_id="kimi", model_id="intermediate",
+        reason="temporary replacement",
+    )
+    replacements.replace(
+        participant_id="CHAIR", provider_id="lithos", model_id="active",
+        reason="later replacement",
+    )
+
+    class ActiveAdapter:
+        def list_models(self):
+            return [ModelDescriptor(provider_id="lithos", model_id="active", input_token_limit=1000)]
+
+    adapters = {"lithos": ActiveAdapter()}
+    output_budgets = add_replacement_output_budgets(
+        repo=repo,
+        adapters=adapters,
+        budgets={("codex", "original"): 500},
+        context_fraction=0.80,
+        fallback_tokens=256,
+    )
+    input_budgets = add_replacement_input_context_budgets(
+        repo=repo,
+        adapters=adapters,
+        budgets={("codex", "original"): 800},
+        safety_fraction=0.80,
+        fallback_tokens=256,
+    )
+
+    assert output_budgets == {("codex", "original"): 500, ("lithos", "active"): 800}
+    assert input_budgets == {("codex", "original"): 800, ("lithos", "active"): 800}
 
 
 def test_later_model_metadata_is_added_as_an_immutable_incremental_upgrade(tmp_path):

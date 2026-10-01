@@ -1,4 +1,4 @@
-governance v0.7.0
+governance v0.7.1
 ├── 00_overview                      # 制度总览与文档索引
 ├── 01_constitution                  # 人类权威、保密、身份与访问规则
 │   └── representative_file_access.md

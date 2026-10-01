@@ -384,11 +384,9 @@ class ScholarlyRenderingRunner:
         length_budget = self._ensure_length_budget(plan, blocks)
         if length_budget is not None:
             self.engine.progress.info(
-                "重绘正文长度目标（输入控制参数）"
-                f" {length_budget['target_characters']:,} 字符；"
-                "出版验收范围"
-                f" {length_budget['lower_bound_characters']:,}–"
-                f"{length_budget['upper_bound_characters']:,} 字符，"
+                "重绘建议正文长度 "
+                f"{length_budget['target_characters']:,} 字符；"
+                "这是软性参考，不设硬性长度门槛，也不保证最终达到；"
                 "参考文献和独立附录不计"
             )
         completed: list[tuple[RenderingAssignment, str]] = []
@@ -795,7 +793,7 @@ class ScholarlyRenderingRunner:
                 ),
                 user={
                     "body_target_characters": target,
-                    "accepted_range_characters": [math.ceil(target * 0.8), math.floor(target * 1.2)],
+                    "policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
                     "sections": [
                         {
                             "section_id": item.section_id,
@@ -826,23 +824,25 @@ class ScholarlyRenderingRunner:
             source_counts.append(count)
             if not self._is_supplementary_assignment(item):
                 weighted.append((index, max(count, 1) * priority_by_id[item.section_id]))
-        if not weighted or target < len(weighted):
-            raise ValueError("body length target cannot be allocated across this rendering plan")
         total_weight = sum(weight for _, weight in weighted)
         allocations = [0] * len(plan.assignments)
-        fractions: list[tuple[float, int]] = []
-        distributable = target - len(weighted)
-        for index, weight in weighted:
-            raw = distributable * weight / total_weight
-            allocations[index] = 1 + math.floor(raw)
-            fractions.append((raw - math.floor(raw), index))
-        remaining = target - sum(allocations)
-        for _, index in sorted(fractions, key=lambda pair: (-pair[0], pair[1]))[:remaining]:
-            allocations[index] += 1
+        if weighted:
+            # Section allocations are hints only. If the requested target is
+            # smaller than the number of sections, prefer one character per
+            # section as a bookkeeping floor rather than rejecting the run.
+            allocation_total = max(target, len(weighted))
+            fractions: list[tuple[float, int]] = []
+            distributable = allocation_total - len(weighted)
+            for index, weight in weighted:
+                raw = distributable * weight / total_weight
+                allocations[index] = 1 + math.floor(raw)
+                fractions.append((raw - math.floor(raw), index))
+            remaining = allocation_total - sum(allocations)
+            for _, index in sorted(fractions, key=lambda pair: (-pair[0], pair[1]))[:remaining]:
+                allocations[index] += 1
         budget = {
             "target_characters": target,
-            "lower_bound_characters": math.ceil(target * 0.8),
-            "upper_bound_characters": math.floor(target * 1.2),
+            "policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
             "measurement": "Unicode non-whitespace characters in approved section Markdown; standalone reference/appendix sections excluded",
             "sections": [
                 {
@@ -2802,41 +2802,29 @@ class ScholarlyRenderingRunner:
             self._count_body_characters(markdown)
             for assignment, markdown in completed if assignment.section_id in counted
         )
-        lower = budget["lower_bound_characters"]
-        upper = budget["upper_bound_characters"]
-        within_range = lower <= actual <= upper
-        ruling_id = None
-        if not within_range:
-            issue = HumanConsultationIssue(
-                issue_id="HC-SR-FINAL-BODY-LENGTH",
-                meeting_id=self.repo.meeting_id,
-                reason_code="SCHOLARLY_RENDERING_LENGTH_OUTSIDE_TOLERANCE",
-                stage="SCHOLARLY_RENDERING_PUBLICATION",
-                question=(
-                    f"已审定正文实测 {actual:,} 个非空白 Unicode 字符；初始化目标为 "
-                    f"{budget['target_characters']:,}，允许范围 {lower:,}–{upper:,}。"
-                    "参考文献和独立附录不计。为保护已完成的事实及引文审阅，"
-                    "程序不能在此直接压缩或填充已冻结章节。是否批准此次超出长度范围的出版？"
-                    "若不批准，保持暂停，另开有新预算的重绘会议。"
-                ),
-                options=["ACCEPT_LENGTH_VARIANCE", "KEEP_PAUSED"],
-                affected_items=[item.section_id for item, _ in completed],
-            )
-            resolution = self._open_integrity_consultation(issue)
-            if resolution.decision != "ACCEPT_LENGTH_VARIANCE":
-                raise ScholarlyRenderingPaused("SCHOLARLY_RENDERING_LENGTH_OUTSIDE_TOLERANCE")
-            ruling_id = issue.issue_id
+        outcome = {
+            "target_characters": budget["target_characters"],
+            "actual_body_characters": actual,
+            "difference_from_target_characters": actual - budget["target_characters"],
+            "policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
+            "measurement": budget["measurement"],
+        }
         relative = Path("public/scholarly_rendering/body_length_outcome.json")
-        if not (self.repo.root / relative).exists():
-            self.repo.docs.write_once(relative, json.dumps({
-                "target_characters": budget["target_characters"],
-                "lower_bound_characters": lower,
-                "upper_bound_characters": upper,
-                "actual_body_characters": actual,
-                "within_tolerance": within_range,
-                "human_ruling_id": ruling_id,
-                "measurement": budget["measurement"],
-            }, indent=2, ensure_ascii=False))
+        outcome_path = self.repo.root / relative
+        if outcome_path.exists():
+            frozen = json.loads(outcome_path.read_text(encoding="utf-8"))
+            # Keep historical advisory/variance metadata for the same frozen body.
+            if (frozen.get("actual_body_characters") != actual
+                    or frozen.get("target_characters") != budget["target_characters"]):
+                raise ValueError("frozen scholarly rendering length outcome conflicts with the publication")
+        else:
+            self.repo.docs.write_once(relative, json.dumps(outcome, indent=2, ensure_ascii=False))
+        progress = getattr(getattr(self, "engine", None), "progress", None)
+        if progress is not None:
+            progress.info(
+                f"重绘正文实测 {actual:,} 个非空白字符；建议篇幅为 "
+                f"{budget['target_characters']:,} 个字符。建议仅供参考，不限制出版，也不保证最终长度。"
+            )
 
     @staticmethod
     def _assemble_publication_body(
@@ -3188,9 +3176,7 @@ class ScholarlyRenderingRunner:
             if allocation is not None:
                 budget_context = {
                     "total_target_characters": budget["target_characters"],
-                    "total_accepted_range_characters": [
-                        budget["lower_bound_characters"], budget["upper_bound_characters"]
-                    ],
+                    "policy": "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED",
                     "this_section_target_characters": allocation["target_characters"],
                     "counts_toward_body_target": allocation["counts_toward_body_target"],
                     "measurement": budget["measurement"],
@@ -3217,7 +3203,7 @@ class ScholarlyRenderingRunner:
             "而不是法规、政策、治理文书或 ENSEMBLE 程序记录。删去无助于读者理解的内部条款、动议和程序引用。"
             "改进结构及学术表达，同时保留所有科学结论、限制、不确定性、引文关系、未解决状态和假设。"
             "不得新增结论、暗中提高证据强度、翻译成额外语言或暴露内部代理身份。"
-            "把主科学判断放在读者容易找到的位置；用完整句法表达对象、条件、比较和推论，"
+                "把主科学判断放在读者容易找到的位置；用完整句法表达对象、条件、比较和推论，"
             "只在原文已有逻辑关系时补足连接词。第一次完整说明重要证据边界，后文无新增边界时"
             "简短指回；不可把不确定性或异议压掉。实现细节、来源状态和开放问题与主论证分层呈现，"
             "但改变结论范围的限制仍须在正文可见。复杂论证比普通段落提供更积极的路标，"
@@ -3226,7 +3212,7 @@ class ScholarlyRenderingRunner:
             " > **实现说明**：说明，HTML 会把它呈现为小号[注]侧栏，PDF 则保留原文。"
             "不能把改变结论范围的关键限制只藏在注释里。"
             + (
-                "若给出正文长度预算，把重复解释和内部程序文字压缩，但不得为长度牺牲科学完整性。"
+                "若给出建议正文篇幅，只作为软性参考；不得为凑长度牺牲科学完整性，也不要求达到目标。"
                 if getattr(self, "manifest", {}).get("rendering_target_body_characters") is not None else ""
             )
             + _READER_FACING_IDENTIFIER_RULE

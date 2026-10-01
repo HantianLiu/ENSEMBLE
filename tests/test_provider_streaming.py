@@ -1,11 +1,14 @@
 import json
+import threading
+import time
 from contextlib import nullcontext
 
 import httpx
 import pytest
 
 from project_ensemble.domain import GenerationRequest
-from project_ensemble.errors import TransientProviderError
+from project_ensemble.errors import ForcedModelReplacementRequested, TransientProviderError
+from project_ensemble.providers.http import interruptible_stream_lines, interruptible_stream_open
 from project_ensemble.providers.gemini import GeminiAdapter
 from project_ensemble.providers.openai_compat import OpenAICompatibleAdapter
 
@@ -43,6 +46,62 @@ class _StreamingClient:
 
     def stream(self, *_args, **_kwargs):
         return nullcontext(self.response)
+
+
+def test_force_switch_during_silent_http_headers_does_not_wait_for_timeout():
+    release = threading.Event()
+    closed = threading.Event()
+
+    class SlowStream:
+        def __enter__(self):
+            release.wait(timeout=2)
+            return object()
+
+        def __exit__(self, *_args):
+            closed.set()
+
+    calls = 0
+
+    def heartbeat(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ForcedModelReplacementRequested("forced")
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(ForcedModelReplacementRequested):
+            with interruptible_stream_open(SlowStream(), heartbeat):
+                pytest.fail("silent stream should not open")
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
+    assert closed.wait(timeout=1)
+
+
+def test_force_switch_during_silent_http_body_does_not_wait_for_timeout():
+    release = threading.Event()
+
+    class SlowResponse:
+        def iter_lines(self):
+            release.wait(timeout=2)
+            yield "data: [DONE]"
+
+    calls = 0
+
+    def heartbeat(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ForcedModelReplacementRequested("forced")
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(ForcedModelReplacementRequested):
+            list(interruptible_stream_lines(SlowResponse(), heartbeat))
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
 
 
 def test_openai_compatible_stream_reports_liveness_without_retaining_reasoning(

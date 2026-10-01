@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from project_ensemble.domain import GenerationRequest, GenerationResponse, ModelDescriptor
@@ -78,20 +79,42 @@ class ClaudeCodeAdapter(ProviderAdapter):
             if on_progress:
                 on_progress("connected", 0, 0)
             try:
-                completed = subprocess.run(
-                    argv, input=request.user_text, text=True, encoding="utf-8",
-                    capture_output=True, cwd=directory, env=environment,
-                    timeout=self.timeout_seconds, check=False,
+                process = subprocess.Popen(
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                    cwd=directory, env=environment,
                 )
-            except subprocess.TimeoutExpired as exc:
-                raise TransientProviderError("Claude Code did not finish within the call timeout") from exc
             except OSError as exc:
                 raise TransientProviderError(f"Claude Code process failed: {exc}") from exc
-            if completed.returncode:
-                detail = completed.stderr.strip() or completed.stdout.strip()
-                raise PermanentProviderError(f"Claude Code exited {completed.returncode}: {detail[:300]}")
+            deadline = time.monotonic() + self.timeout_seconds
+            next_input: str | None = request.user_text
             try:
-                payload = json.loads(completed.stdout)
+                while True:
+                    if on_progress is not None:
+                        on_progress("heartbeat", 0, 0)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TransientProviderError("Claude Code did not finish within the call timeout")
+                    try:
+                        stdout, stderr = process.communicate(
+                            input=next_input, timeout=min(remaining, 0.25)
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        next_input = None
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=3)
+            if process.returncode:
+                detail = stderr.strip() or stdout.strip()
+                raise PermanentProviderError(f"Claude Code exited {process.returncode}: {detail[:300]}")
+            try:
+                payload = json.loads(stdout)
             except json.JSONDecodeError as exc:
                 raise TransientProviderError("Claude Code returned malformed JSON") from exc
             if not isinstance(payload, dict) or payload.get("is_error"):

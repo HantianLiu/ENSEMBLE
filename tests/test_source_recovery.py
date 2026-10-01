@@ -5,7 +5,7 @@ import logging
 from io import StringIO
 
 from project_ensemble.research.documents import DownloadedDocument, is_access_blocked_document
-from project_ensemble.research.pdf_warnings import capture_duplicate_pdf_length_warnings
+from project_ensemble.research.pdf_warnings import capture_recoverable_pdf_warnings
 from project_ensemble.research.retrievers import PolicyResearchRetriever, ResearchRetrievalResult, TavilyRetriever
 from project_ensemble.research.source_reading import SourceReader
 from project_ensemble.storage.meeting import MeetingRepository
@@ -85,7 +85,7 @@ def test_repetitive_pdf_length_warning_is_counted_not_printed():
     handler = logging.StreamHandler(stream)
     logger.addHandler(handler)
     try:
-        with capture_duplicate_pdf_length_warnings() as summary:
+        with capture_recoverable_pdf_warnings() as summary:
             logger.warning("Multiple definitions in dictionary at byte 0x74249 for key /Length")
             logger.warning("Other structural warning")
     finally:
@@ -101,7 +101,7 @@ def test_recoverable_pdf_cmap_warning_is_counted_not_printed():
     handler = logging.StreamHandler(stream)
     logger.addHandler(handler)
     try:
-        with capture_duplicate_pdf_length_warnings() as summary:
+        with capture_recoverable_pdf_warnings() as summary:
             logger.warning("Skipping broken line b'14fd   14ff   10300': Odd-length string")
             logger.warning("A different PDF warning")
     finally:
@@ -109,6 +109,23 @@ def test_recoverable_pdf_cmap_warning_is_counted_not_printed():
     assert summary.broken_cmap_line_count == 1
     assert "Skipping broken line" not in stream.getvalue()
     assert "A different PDF warning" in stream.getvalue()
+
+
+def test_recoverable_pdf_wrong_pointing_object_warning_is_counted_not_printed():
+    logger = logging.getLogger("pypdf._reader")
+    stream = StringIO()
+    handler = logging.StreamHandler(stream)
+    logger.addHandler(handler)
+    try:
+        with capture_recoverable_pdf_warnings() as summary:
+            logger.warning("Ignoring wrong pointing object 17 0 (offset 0)")
+            logger.warning("A different PDF reader warning")
+    finally:
+        logger.removeHandler(handler)
+    assert summary.wrong_pointing_object_count == 1
+    assert summary.first_wrong_pointing_object == "Ignoring wrong pointing object 17 0 (offset 0)"
+    assert "Ignoring wrong pointing object" not in stream.getvalue()
+    assert "A different PDF reader warning" in stream.getvalue()
 
 
 def test_generic_alternative_search_recovers_blocked_original_without_site_mapping(tmp_path):

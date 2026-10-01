@@ -1,4 +1,4 @@
-"""Conservative, copy-on-write import of a v0.6 meeting into v0.7.0.
+"""Conservative, copy-on-write import of a v0.6 meeting into the current runtime.
 
 Frozen meeting artifacts and the historical hash chain are copied byte for byte.
 Only new metadata in the destination identifies the runtime and configuration
@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from project_ensemble import __version__
+from project_ensemble import GOVERNANCE_VERSION, __version__
 from project_ensemble.config import EnsembleConfig, load_config
 from project_ensemble.storage.meeting import (
     MeetingRepository,
@@ -125,7 +125,7 @@ def inspect_v06_meeting(
         old_config_path = _read_json(legacy_config_ref).get("config_path")
         if old_config_path and Path(str(old_config_path)).expanduser().resolve() == config.source_path:
             raise ValueError(
-                "迁移必须使用独立的 v0.7.0 配置文件，不能复用旧会议记录的 v0.6 配置路径"
+                f"迁移必须使用独立的 v{__version__} 配置文件，不能复用旧会议记录的 v0.6 配置路径"
             )
     public = _read_json(public_path)
     private = _read_json(private_path)
@@ -150,7 +150,7 @@ def inspect_v06_meeting(
         raise ValueError("公开 manifest、私有 manifest 与任务的会议类型不一致")
     if public.get("meeting_type") == "audit":
         raise ValueError(
-            "v0.7.0 尚无审计会议执行器，不能将 v0.6 审计会议升级为可续跑会议"
+            "当前版本尚无审计会议执行器，不能将 v0.6 审计会议升级为可续跑会议"
         )
     meeting_id = str(public["meeting_id"])
     if not meeting_id.startswith("M-") or root.name != meeting_id:
@@ -169,12 +169,12 @@ def inspect_v06_meeting(
     )
     if missing_providers:
         raise ValueError(
-            "v0.7.0 模型配置缺少会议需要的已启用供应商："
+            f"v{__version__} 模型配置缺少会议需要的已启用供应商："
             + ", ".join(missing_providers)
         )
     governance = Path(config.project.governance_docs)
     if not governance.is_dir():
-        raise ValueError(f"v0.7.0 制度文件目录不存在：{governance}")
+        raise ValueError(f"v{__version__} 制度文件目录不存在：{governance}")
     # Check links before copying. This also rejects special files and records
     # the exact source bytes later checked against the copied snapshot.
     inventory = _inventory(root)
@@ -198,7 +198,7 @@ def migrate_v06_meeting(
     config_path: str | Path,
     dry_run: bool = False,
 ) -> dict:
-    """Copy a v0.6 meeting and pin v0.7.0 metadata in the new directory."""
+    """Copy a v0.6 meeting and pin current software/governance metadata."""
 
     root = Path(source).expanduser().resolve()
     target = Path(destination).expanduser().resolve()
@@ -231,7 +231,7 @@ def migrate_v06_meeting(
             legacy_manifest_path.parent.mkdir(parents=True, exist_ok=True)
             legacy_manifest_path.write_bytes(private_path.read_bytes())
             private["software_version"] = __version__
-            private["governance_version"] = __version__
+            private["governance_version"] = GOVERNANCE_VERSION
             private["governance_digest"] = report["target_governance_digest"]
             private_path.write_text(json.dumps(private, indent=2, ensure_ascii=False), encoding="utf-8")
 

@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from project_ensemble.research.models import NormalizedClaim
-from project_ensemble.research.pdf_warnings import capture_duplicate_pdf_length_warnings
+from project_ensemble.research.pdf_warnings import capture_recoverable_pdf_warnings
 from project_ensemble.research.retrievers import ResearchRetrievalResult
 from project_ensemble.storage.meeting import MeetingRepository
 
@@ -68,7 +68,7 @@ def _extract_text(path: Path) -> str:
         from pypdf import PdfReader
 
         try:
-            with capture_duplicate_pdf_length_warnings():
+            with capture_recoverable_pdf_warnings():
                 reader = PdfReader(str(path))
                 parts: list[str] = []
                 size = 0

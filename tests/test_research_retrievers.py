@@ -429,6 +429,35 @@ def test_policy_retriever_routes_nonacademic_claims_to_web_search():
     assert result.effective_backend_ids == ("tavily",)
 
 
+def test_academic_exploration_skips_paid_web_when_openalex_succeeds():
+    from project_ensemble.research.retrievers import PolicyResearchRetriever
+
+    class OpenAlex:
+        backend_ids = ("openalex",)
+        calls = 0
+
+        def retrieve_exploratory(self, _query):
+            self.calls += 1
+            return ResearchRetrievalResult([], [], ("openalex",))
+
+    class Tavily:
+        backend_ids = ("tavily",)
+        calls = 0
+
+        def retrieve_exploratory(self, _query):
+            self.calls += 1
+            return ResearchRetrievalResult([], [], ("tavily",))
+
+    openalex, tavily = OpenAlex(), Tavily()
+    policy = PolicyResearchRetriever(openalex, tavily)
+    academic = policy.retrieve_exploratory("interface tension", academic_only=True)
+    assert academic.effective_backend_ids == ("openalex",)
+    assert tavily.calls == 0
+    broad = policy.retrieve_exploratory("interface tension")
+    assert set(broad.effective_backend_ids) == {"openalex", "tavily"}
+    assert openalex.calls == 2 and tavily.calls == 1
+
+
 def test_composite_retriever_fails_only_when_every_backend_is_unavailable():
     retriever = CompositeRetriever(
         [_UnavailableRetriever("openalex"), _UnavailableRetriever("tavily")]

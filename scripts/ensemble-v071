@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Compatibility alias retained for scripts written before v0.7.1 became the
-# canonical `ensemble` command.
+# Compatibility alias retained from the original v0.7.1 distribution name.
 launcher_path="$(readlink -f "$0")"
 script_dir="$(dirname "$launcher_path")"
 exec "$script_dir/ensemble" "$@"

@@ -1,5 +1,6 @@
 import json
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -196,6 +197,33 @@ def _normalization_json():
             "freshness_rationale": "This is a slowly changing scholarly claim.",
             "rejection_reason": None,
         }
+    )
+
+
+def test_research_desk_prose_fields_receive_style_without_changing_query_fields(tmp_path):
+    preferences = tmp_path / "public/literature_report/writing_preferences.json"
+    preferences.parent.mkdir(parents=True)
+    preferences.write_text(json.dumps({"signposting_1_to_5": 2}), encoding="utf-8")
+    profile = tmp_path / "public/literature_report/audience_profile-01.json"
+    profile.write_text(json.dumps({"disciplines": {"材料科学": 3}}), encoding="utf-8")
+    desk = ResearchDesk.__new__(ResearchDesk)
+    desk.repo = SimpleNamespace(root=tmp_path)
+    desk.engine = FakeEngine([_normalization_json()])
+    desk.max_output_tokens = None
+
+    desk._normalize(ResearchRequest(
+        requester_id="WRITER", stage=ResearchStage.LITERATURE_REPORT,
+        claim="The measured response changes under condition C.",
+    ))
+
+    prompt = desk.engine.requests[0]["system_text"]
+    assert "结构化结果的自由文本表达规则" in prompt
+    assert '"ordinary_level":2' in prompt
+    assert '"complex_level":3' in prompt
+    assert '"材料科学"' in prompt
+    assert "检索式、来源标识、引文、公式、数值" in prompt
+    assert desk.engine.requests[0]["user_text"].endswith(
+        "The measured response changes under condition C."
     )
 
 
@@ -585,7 +613,10 @@ def test_research_desk_places_stable_schemas_before_variable_claim_content(tmp_p
     assert "固定输出要求" in synthesis["system_text"]
     assert "目标 JSON Schema" not in synthesis["user_text"]
     assert "候选来源" in synthesis["user_text"]
-    assert "只使用给定候选来源的元数据和摘要" in synthesis["system_text"]
+    assert "只使用下方候选来源实际提供的材料" in synthesis["system_text"]
+    assert "元数据用于识别来源，不能替代对具体内容的核查" in synthesis["system_text"]
+    assert "每项具体发现都必须能在实际取得的相关摘录中定位" in synthesis["system_text"]
+    assert "只使用给定候选来源的元数据和摘要" not in synthesis["system_text"]
 
 
 def test_research_desk_repairs_only_missing_screening_decisions(tmp_path):

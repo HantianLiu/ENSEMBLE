@@ -5,7 +5,7 @@ from collections import deque
 import pytest
 
 from project_ensemble.domain import GenerationRequest, ReasoningEffort
-from project_ensemble.errors import PermanentProviderError
+from project_ensemble.errors import ForcedModelReplacementRequested, PermanentProviderError
 from project_ensemble.providers import codex_subscription
 
 
@@ -84,6 +84,26 @@ def test_codex_subscription_uses_chatgpt_ephemeral_isolated_thread(monkeypatch):
     assert thread["baseInstructions"] == "制度"
     assert turn["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
     assert turn["effort"] == "high"
+
+
+def test_silent_codex_response_can_be_force_stopped_before_transport_timeout():
+    import queue
+    import time
+
+    server = codex_subscription._AppServer.__new__(codex_subscription._AppServer)
+    server._events = queue.Queue()
+    polls = []
+
+    def poll():
+        polls.append(time.monotonic())
+        if len(polls) == 2:
+            raise ForcedModelReplacementRequested("forced")
+
+    server._poll_callback = poll
+    started = time.monotonic()
+    with pytest.raises(ForcedModelReplacementRequested):
+        server.next_event(started + 20)
+    assert time.monotonic() - started < 1.0
 
 
 def test_codex_subscription_uses_configured_model_context_for_discovery_and_calls(monkeypatch):

@@ -5,6 +5,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from typing import Any, TypeVar
 
+from project_ensemble.errors import ForcedModelReplacementRequested
 from project_ensemble.runtime.progress import ProgressReporter, TaskProgressItem
 
 
@@ -85,10 +86,22 @@ def run_bounded_model_lanes(
         with guard:
             with ThreadPoolExecutor(max_workers=len(pending)) as executor:
                 while pending or in_flight:
+                    if getattr(progress, "safe_exit_pending", lambda: False)():
+                        raise KeyboardInterrupt
+                    if getattr(progress, "force_control_pending", lambda: False)():
+                        raise ForcedModelReplacementRequested(
+                            "Human force-stopped active model calls in this batch"
+                        )
                     if getattr(progress, "control_request_pending", lambda: False)():
                         menu = getattr(progress, "interactive_menu", None)
                         with (menu() if callable(menu) else nullcontext()):
                             live_controls()
+                        # A batch-menu force stop must be observed before
+                        # admitting any further work to a model lane.
+                        if getattr(progress, "force_control_pending", lambda: False)():
+                            raise ForcedModelReplacementRequested(
+                                "Human force-stopped active model calls in this batch"
+                            )
                     index = 0
                     while index < len(pending):
                         original_key, position, item = pending[index]

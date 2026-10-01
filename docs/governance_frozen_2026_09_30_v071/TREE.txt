@@ -1,0 +1,23 @@
+governance v0.7.0
+├── 00_overview                      # 制度总览与文档索引
+├── 01_constitution                  # 人类权威、保密、身份与访问规则
+│   └── representative_file_access.md
+├── 02_deliberation                  # 审议、文献报告、学术重绘与交付
+│   ├── literature_review_continuation.md
+│   └── scholarly_rendering.md
+├── 03_roles                         # Chair、四办公室与 Research Librarian
+├── 04_think_tank                    # 智库审阅
+├── 05_audit_conference              # 审计制度（执行状态机尚未实现）
+├── 06_execution_interface           # 人类澄清与执行交接
+├── 07_runtime_memory                # 角色运行记忆，包括科学/引文 bookkeeper
+├── 07_runtime_protocol
+│   └── deliberation                 # 总则、细则、研究报告与渲染阶段协议
+├── 08_schemas                       # 制度文书示例
+├── 09_access_control                # 文件访问矩阵与加载规则
+├── 10_open_questions                # 已定案事项与剩余开放问题
+├── CHANGELOG.md
+├── README.md
+├── TREE.txt
+└── VERSION.md
+
+完整逐文件清单以 Git 仓库和根目录 TREE.txt 为准；本文件只表示制度层级。

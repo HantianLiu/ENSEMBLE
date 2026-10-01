@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.1 governance baseline — 2026-09-25
+
+- Added the trial literature-writing procedure for new literature-report
+  meetings: structure-only module outlines, a dedicated academic Writer,
+  two-round scientific review, and publication-stage assembly.
+- Added bounded fast-literature planning with anonymous parallel split proposals
+  and Writer-led taskbook formation.
+- Software releases may advance independently while this governance baseline
+  remains pinned as `0.7.1` in meeting manifests.
+
 ## v0.7.0 release — 2026-09-22
 
 - Added the independent `project-ensemble-v07` distribution and `ensemble-v07`

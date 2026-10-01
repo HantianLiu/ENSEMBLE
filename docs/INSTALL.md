@@ -1,6 +1,6 @@
 # 安装与配置 / Installation and configuration
 
-> v0.7.1 独立版本：本目录安装的主命令是 `ensemble`，旧版本改用
+> v0.7.3 软件发行版（v0.7.1 文献写作规则）：本目录安装的主命令是 `ensemble`，旧版本改用
 > `ensemble-old`。下文从 v0.7.0 继承的示例中如需运行本版本，请把命令读作
 > `ensemble`，并使用本目录的独立虚拟环境。`ensemble-v071` 仅保留为兼容别名。
 > 新文献报告会议会额外询问学术主笔的模型和推理强度；旧会议请用 `ensemble-old`

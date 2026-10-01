@@ -33,6 +33,31 @@ def user_config_path() -> Path:
     return settings_dir() / "ensemble.toml"
 
 
+def _removed_providers_path() -> Path:
+    return settings_dir() / "removed_providers.toml"
+
+
+def removed_provider_ids() -> set[str]:
+    try:
+        data = tomllib.loads(_removed_providers_path().read_text(encoding="utf-8"))
+        return set(data.get("catalog", {}).get("removed", []))
+    except (OSError, tomllib.TOMLDecodeError, AttributeError, TypeError):
+        return set()
+
+
+def _save_removed_provider_ids(provider_ids: set[str]) -> None:
+    rendered = "[catalog]\nremoved = " + _value(sorted(provider_ids)) + "\n"
+    tomllib.loads(rendered)
+    _atomic_write(_removed_providers_path(), rendered)
+
+
+def _clear_provider_removal(provider_id: str) -> None:
+    removed = removed_provider_ids()
+    if provider_id in removed:
+        removed.remove(provider_id)
+        _save_removed_provider_ids(removed)
+
+
 def _value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -119,7 +144,55 @@ def add_provider(provider_id: str, provider: ProviderConfig, *, seed_path: str |
     tomllib.loads(updated)
     _atomic_write(model_path, updated)
     load_config(config_path)
+    _clear_provider_removal(provider_id)
     return config_path
+
+
+def _write_provider_catalog(config_path: Path, providers: dict[str, dict]) -> Path:
+    model_path = config_path.parent / "model_config.toml"
+    rendered = "# User-level model configuration; do not commit secrets.\n\n"
+    rendered += "\n\n".join(
+        _table(f"providers.{json.dumps(provider_id)}", fields)
+        for provider_id, fields in providers.items()
+    ) + "\n"
+    tomllib.loads(rendered)
+    _atomic_write(model_path, rendered)
+    load_config(config_path)
+    return config_path
+
+
+def update_provider(
+    provider_id: str, provider: ProviderConfig, *, seed_path: str | Path | None = None
+) -> Path:
+    config_path = ensure_user_config(seed_path)
+    model_path = config_path.parent / "model_config.toml"
+    data = tomllib.loads(model_path.read_text(encoding="utf-8"))
+    data.setdefault("providers", {})[provider_id] = provider.model_dump(exclude_none=True)
+    path = _write_provider_catalog(config_path, data["providers"])
+    _clear_provider_removal(provider_id)
+    return path
+
+
+def remove_provider(provider_id: str, *, seed_path: str | Path | None = None) -> Path:
+    config_path = ensure_user_config(seed_path)
+    model_path = config_path.parent / "model_config.toml"
+    data = tomllib.loads(model_path.read_text(encoding="utf-8"))
+    data.setdefault("providers", {}).pop(provider_id, None)
+    path = _write_provider_catalog(config_path, data["providers"])
+    removed = removed_provider_ids()
+    removed.add(provider_id)
+    _save_removed_provider_ids(removed)
+    return path
+
+
+def replace_managed_secret(provider_id: str, env_name: str, secret: str) -> Path:
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", env_name):
+        raise ValueError("环境变量名只能包含大写字母、数字和下划线")
+    if not secret or "\n" in secret or "\r" in secret:
+        raise ValueError("API 密钥不能为空或含换行")
+    path = settings_dir() / "secrets" / f"{provider_id}.sh"
+    _atomic_write(path, f"{env_name}={shlex.quote(secret)}\n", secret=True)
+    return path
 
 
 def store_secret(provider_id: str, env_name: str, secret: str) -> Path:
@@ -240,6 +313,83 @@ def appearance() -> tuple[str, int]:
     return "auto", 100
 
 
+def _manage_provider_interactively(wizard, *, seed_path, secret_input, t, output):
+    config_path = ensure_user_config(seed_path)
+    config = load_config(config_path)
+    providers = dict(load_config(seed_path).providers) if seed_path else {}
+    providers.update(config.providers)
+    providers = {key: value for key, value in providers.items() if key not in removed_provider_ids()}
+    if not providers:
+        print(t("目前没有已配置的供应商。", "No providers are configured."), file=output)
+        return config_path
+    choices = [
+        (provider_id, f"{provider.display_name or provider_id} · {provider_id} · {provider.kind}")
+        for provider_id, provider in providers.items()
+    ]
+    choices.append(("back", t("返回供应商设置", "Back to provider settings")))
+    provider_id = wizard._choose_one(t("选择要管理的供应商", "Choose a provider to manage"), choices)
+    if provider_id == "back":
+        return None
+    provider = providers[provider_id]
+    action = wizard._choose_one(t(f"管理 {provider.display_name or provider_id}", f"Manage {provider.display_name or provider_id}"), [
+        ("rename", t("修改显示名称", "Change display name")),
+        ("url", t("修改 API 基础地址", "Change API base URL")),
+        ("key", t("更换 API 密钥", "Replace API key")),
+        ("delete", t("删除供应商配置", "Delete provider configuration")),
+        ("back", t("返回供应商列表", "Back to provider list")),
+    ])
+    if action == "back":
+        return None
+    if action == "rename":
+        display_name = wizard.input(t("新的显示名称: ", "New display name: ")).strip()
+        if not display_name:
+            raise ValueError("供应商显示名称不能为空")
+        updated = provider.model_copy(update={"display_name": display_name})
+        path = update_provider(provider_id, updated, seed_path=seed_path)
+        print(t("显示名称已保存。", "Display name saved."), file=output)
+        return path
+    if action == "url":
+        if provider.kind not in {"openai_compatible", "gemini"}:
+            print(t("此调用方式没有可编辑的 API 基础地址。", "This provider type has no editable API base URL."), file=output)
+            return config_path
+        url = wizard.input(t("新的 API 基础地址: ", "New API base URL: ")).strip()
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError("API 基础地址必须是完整的 http(s) URL")
+        updated = provider.model_copy(update={"base_url": url})
+        path = update_provider(provider_id, updated, seed_path=seed_path)
+        print(t("API 基础地址已保存；后续会议和模型切换将使用新地址。", "API base URL saved; future meetings and model switches will use it."), file=output)
+        return path
+    if action == "key":
+        if provider.kind == "codex_subscription":
+            print(t("Codex 使用本机登录，不配置 API 密钥。", "Codex uses local login and has no API key."), file=output)
+            return config_path
+        env_name = "ENSEMBLE_" + re.sub(r"[^A-Z0-9_]", "_", provider_id.upper()) + "_MANAGED_KEY"
+        secret = (secret_input or getpass.getpass)(t("新 API 密钥（输入不回显）: ", "New API key (input hidden): "))
+        updated = provider.model_copy(update={
+            "api_key_env": env_name,
+            "api_key_file": str(settings_dir() / "secrets" / f"{provider_id}.sh"),
+        })
+        # Validate before replacing the managed secret.
+        updated = ProviderConfig.model_validate(updated.model_dump())
+        replace_managed_secret(provider_id, env_name, secret)
+        path = update_provider(provider_id, updated, seed_path=seed_path)
+        print(t("新密钥已安全保存到本机用户密钥库；不会写入会议目录。", "New key saved in the local user secret store; it is not written to meeting files."), file=output)
+        return path
+    if action == "delete":
+        answer = wizard.input(t(
+            f"确认删除供应商 {provider.display_name or provider_id}（{provider_id}）？依赖该供应商的未完成会议需重新添加配置后才能恢复。输入 DELETE {provider_id} 确认: ",
+            f"Delete provider {provider.display_name or provider_id} ({provider_id})? Unfinished meetings that use it will need the provider re-added before they can resume. Type DELETE {provider_id} to confirm: ",
+        )).strip()
+        if answer != f"DELETE {provider_id}":
+            print(t("已取消；配置未更改。", "Cancelled; configuration unchanged."), file=output)
+            return config_path
+        path = remove_provider(provider_id, seed_path=seed_path)
+        print(t("供应商配置已删除；本机密钥文件（如有）保留，避免误删其他用途的凭据。", "Provider configuration deleted; any local key file is retained to avoid removing credentials used elsewhere."), file=output)
+        return path
+    return None
+
+
 def configure_interactively(wizard, *, seed_path: str | Path | None = None, secret_input: Callable[[str], str] | None = None) -> Path | None:
     """Guide one settings action. None means back to the home menu."""
     output: TextIO = wizard.output
@@ -349,15 +499,26 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
         )
         print(t(f"联网检索设置已保存：{path}；只影响新会议。", f"Search settings saved to {path}; affects new meetings only."), file=output)
         return path
+    provider_action = wizard._choose_one("模型供应商", [
+        ("add", t("添加供应商", "Add a provider")),
+        ("manage", t("管理已有供应商：改名、修改网址、更换密钥或删除", "Manage providers: rename, change URL, replace key, or delete")),
+        ("back", t("返回设置", "Back to Settings")),
+    ])
+    if provider_action == "back":
+        return None
+    if provider_action == "manage":
+        return _manage_provider_interactively(
+            wizard, seed_path=seed_path, secret_input=secret_input, t=t, output=output
+        )
     existing_path = user_config_path() if user_config_path().is_file() else seed_path
     if existing_path:
         existing_providers = load_config(existing_path).providers
         if existing_providers:
             print(t("已配置供应商（本向导新增代号，不覆盖已有条目）：", "Configured providers (this wizard adds a new ID; it does not overwrite existing entries):"), file=output)
             for existing_id, existing in existing_providers.items():
-                state = t("已启用", "enabled") if existing.enabled else t("未启用", "disabled")
-                print(f"  {existing_id} · {existing.display_name or existing_id} · {state}", file=output)
+                print(f"  {existing_id} · {existing.display_name or existing_id}", file=output)
     kind = wizard._choose_one("调用方式", [
+        ("lithosai", "LithosAI（OpenAI 兼容 API；自动填入官方地址）"),
         ("openai_compatible", "OpenAI 兼容 API（DeepSeek、GLM、Kimi 等）"),
         ("gemini", "Google Gemini 原生 API"),
         ("codex_subscription", "Codex CLI；使用本机 ChatGPT 登录，不输入 API 密钥"),
@@ -366,22 +527,48 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
     ])
     if kind == "back":
         return None
-    name = wizard.input("供应商显示名称（可用中文）: ").strip()
-    if not name:
-        raise ValueError("供应商显示名称不能为空")
-    provider_id = wizard.input("供应商代号（小写英文，会议记录将使用它，如 my_glm）: ").strip()
+    lithosai_preset = kind == "lithosai"
+    if lithosai_preset:
+        kind = "openai_compatible"
+        name = "LithosAI"
+        provider_id = "lithos"
+        if existing_path and provider_id in existing_providers:
+            print(t(
+                "LithosAI 已配置；没有覆盖现有设置。",
+                "LithosAI is already configured; existing settings were left unchanged.",
+            ), file=output)
+            return existing_path
+    else:
+        name = wizard.input("供应商显示名称（可用中文）: ").strip()
+        if not name:
+            raise ValueError("供应商显示名称不能为空")
+        provider_id = wizard.input("供应商代号（小写英文，会议记录将使用它，如 my_glm）: ").strip()
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", provider_id):
         raise ValueError("供应商代号须以小写英文字母开头，只能包含小写字母、数字、-、_")
     if existing_path and provider_id in existing_providers:
         raise ValueError(f"供应商代号 {provider_id} 已存在；请选择另一代号")
     fields: dict = {"kind": kind, "display_name": name, "timeout_seconds": 1200.0}
+    if lithosai_preset:
+        fields.update({
+            "reasoning_effort_transport": "openai",
+            "reasoning_effort_map": {"low": "low", "medium": "high", "high": "max"},
+            "reasoning_effort_model_patterns": ["*kimi-k3*"],
+        })
     pending_secret: tuple[str, str, str] | None = None
     if kind in {"openai_compatible", "gemini"}:
-        default_url = "https://generativelanguage.googleapis.com/v1beta" if kind == "gemini" else ""
-        url = wizard.input(t(
-            f"API 基础地址{f' [默认 {default_url}]' if default_url else ''}: ",
-            f"API base URL{f' [default {default_url}]' if default_url else ''}: ",
-        )).strip() or default_url
+        default_url = (
+            "https://generativelanguage.googleapis.com/v1beta" if kind == "gemini"
+            else "https://api.lithosai.cloud/v1" if lithosai_preset
+            else ""
+        )
+        if lithosai_preset:
+            url = default_url
+            print(t(f"LithosAI API 地址：{url}", f"LithosAI API base URL: {url}"), file=output)
+        else:
+            url = wizard.input(t(
+                f"API 基础地址{f' [默认 {default_url}]' if default_url else ''}: ",
+                f"API base URL{f' [default {default_url}]' if default_url else ''}: ",
+            )).strip() or default_url
         parsed_url = urlparse(url)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
             raise ValueError("API 基础地址必须是完整的 http(s) URL，例如 https://host/v1")
@@ -395,8 +582,11 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
     else:
         auth = "login" if kind == "codex_subscription" else "key"
     if auth == "key":
-        default_env = re.sub(r"[^A-Z0-9_]", "_", provider_id.upper()) + "_API_KEY"
-        env_name = wizard.input(t(f"环境变量名称 [{default_env}]: ", f"Environment variable name [{default_env}]: ")).strip() or default_env
+        default_env = "LITHOSAI_API_KEY" if lithosai_preset else re.sub(r"[^A-Z0-9_]", "_", provider_id.upper()) + "_API_KEY"
+        env_name = default_env if lithosai_preset else (
+            wizard.input(t(f"环境变量名称 [{default_env}]: ", f"Environment variable name [{default_env}]: ")).strip()
+            or default_env
+        )
         if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", env_name):
             raise ValueError("环境变量名只能包含大写字母、数字和下划线")
         fields["api_key_env"] = env_name

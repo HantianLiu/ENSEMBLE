@@ -61,8 +61,9 @@ def test_new_rendering_length_budget_is_frozen_and_excludes_references(tmp_path)
         ], rationale="Results need more space."
     )
     budget = runner._ensure_length_budget(plan, blocks)
-    assert budget["lower_bound_characters"] == 800
-    assert budget["upper_bound_characters"] == 1200
+    assert budget["policy"] == "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED"
+    assert "lower_bound_characters" not in budget
+    assert "upper_bound_characters" not in budget
     assert sum(item["target_characters"] for item in budget["sections"]) == 1000
     assert budget["sections"][1]["target_characters"] > budget["sections"][0]["target_characters"]
     assert budget["sections"][2]["target_characters"] == 0
@@ -74,7 +75,7 @@ def test_new_rendering_length_budget_is_frozen_and_excludes_references(tmp_path)
     ])
     outcome = json.loads((tmp_path / "public/scholarly_rendering/body_length_outcome.json").read_text())
     assert outcome["actual_body_characters"] == 1000
-    assert outcome["within_tolerance"] is True
+    assert outcome["policy"] == "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED"
 
 
 def test_empty_science_panel_requires_human_source_fidelity_ruling(tmp_path):
@@ -97,7 +98,7 @@ def test_empty_science_panel_requires_human_source_fidelity_ruling(tmp_path):
     assert runner._recover_empty_science_panel(assignment, cycle=1) == {"R-A", "R-B"}
 
 
-def test_out_of_range_rendering_length_needs_human_exception(tmp_path):
+def test_rendering_length_is_advisory_and_never_blocks_publication(tmp_path):
     repo = MeetingRepository(tmp_path)
     repo.docs.write_once("public/meeting_manifest.json", json.dumps({"meeting_id": "M-TEST"}))
     repo.docs.write_once("public/scholarly_rendering/body_length_budget.json", json.dumps({
@@ -111,20 +112,12 @@ def test_out_of_range_rendering_length_needs_human_exception(tmp_path):
     runner.repo = repo
     assignment = RenderingAssignment(section_id="SR-001", title="Body", source_block_ids=["SB-001"])
     completed = [(assignment, "甲" * 1300)]
-    with pytest.raises(ScholarlyRenderingPaused, match="SCHOLARLY_RENDERING_LENGTH_OUTSIDE_TOLERANCE"):
-        runner._check_final_length_budget(completed)
-    service = HumanConsultationService(repo)
-    issue = service.open_issues()[0]
-    service.resolve(
-        issue_id=issue.issue_id, decision="ACCEPT_LENGTH_VARIANCE",
-        rationale="Scientific fidelity requires this additional text.",
-        scope="THIS_CONSULTATION_ONLY",
-    )
     runner._check_final_length_budget(completed)
     outcome = json.loads((tmp_path / "public/scholarly_rendering/body_length_outcome.json").read_text())
     assert outcome["actual_body_characters"] == 1300
-    assert outcome["within_tolerance"] is False
-    assert outcome["human_ruling_id"] == issue.issue_id
+    assert outcome["difference_from_target_characters"] == 300
+    assert outcome["policy"] == "ADVISORY_ONLY; NO_HARD_LIMIT; FINAL_LENGTH_NOT_GUARANTEED"
+    assert not (tmp_path / "human_private/consultations").exists()
 
 
 def test_intermediate_science_vote_accepts_advisory_style_note_but_final_does_not():

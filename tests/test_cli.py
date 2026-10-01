@@ -1,13 +1,17 @@
 import io
 import json
+import os
 import stat
 import sys
+import termios
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from project_ensemble import cli
+from project_ensemble.config import EnsembleConfig, ProviderConfig
 from project_ensemble.domain import ModelDescriptor
 from project_ensemble.errors import FeatureNotImplementedError, PolicyNotConfiguredError
 from project_ensemble.orchestration.consultations import (
@@ -18,6 +22,60 @@ from project_ensemble.orchestration.consultations import (
 from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.providers.fake import ScriptedProviderAdapter
 from project_ensemble.storage.meeting import MeetingRepository
+
+
+def test_runtime_config_merges_user_added_providers_with_project_config(monkeypatch, tmp_path):
+    project_path = tmp_path / "project.toml"
+    user_path = tmp_path / "user.toml"
+    project_path.touch()
+    user_path.touch()
+    project = EnsembleConfig(providers={
+        "deepseek": ProviderConfig(kind="openai_compatible", base_url="https://project.test/v1", api_key_env="PROJECT_KEY"),
+    })
+    user = EnsembleConfig(providers={
+        "lithos": ProviderConfig(kind="openai_compatible", display_name="LithosAI", base_url="https://api.lithosai.cloud/v1", api_key_env="LITHOSAI_API_KEY"),
+        "deepseek": ProviderConfig(kind="openai_compatible", base_url="https://user.test/v1", api_key_env="USER_KEY"),
+    })
+    monkeypatch.setattr(cli, "user_config_path", lambda: user_path)
+    monkeypatch.setattr(cli, "load_config", lambda path: user if Path(path) == user_path else project)
+
+    loaded = cli._load_config(project_path)
+
+    assert set(loaded.providers) == {"deepseek", "lithos"}
+    assert loaded.providers["lithos"].base_url == "https://api.lithosai.cloud/v1"
+    assert loaded.providers["deepseek"].base_url == "https://user.test/v1"
+
+
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_main_restores_terminal_echo_on_every_exit(monkeypatch, raise_error):
+    master_fd, slave_fd = os.openpty()
+    tty_input = os.fdopen(os.dup(slave_fd), "r", encoding="utf-8")
+    original = termios.tcgetattr(tty_input.fileno())
+    monkeypatch.setattr(sys, "stdin", tty_input)
+
+    def run():
+        edited = termios.tcgetattr(tty_input.fileno())
+        edited[3] &= ~(termios.ECHO | termios.ICANON)
+        termios.tcsetattr(tty_input.fileno(), termios.TCSANOW, edited)
+        if raise_error:
+            raise RuntimeError("simulated unexpected exit")
+        return 0
+
+    monkeypatch.setattr(cli, "_main_impl", run)
+    try:
+        if raise_error:
+            with pytest.raises(RuntimeError, match="simulated unexpected exit"):
+                cli.main()
+        else:
+            assert cli.main() == 0
+        restored = termios.tcgetattr(tty_input.fileno())
+        assert restored[3] & termios.ECHO == original[3] & termios.ECHO
+        assert restored[3] & termios.ICANON == original[3] & termios.ICANON
+    finally:
+        termios.tcsetattr(tty_input.fileno(), termios.TCSANOW, original)
+        tty_input.close()
+        os.close(master_fd)
+        os.close(slave_fd)
 
 
 def test_v07_refuses_in_place_resume_with_changed_governance(tmp_path):
@@ -42,6 +100,66 @@ def test_v07_refuses_in_place_resume_with_changed_governance(tmp_path):
         cli._assert_meeting_runtime_compatible(
             repo, governance_docs=changed_governance
         )
+
+
+def test_v073_can_resume_v071_meeting_with_same_frozen_governance(tmp_path):
+    governance = tmp_path / "governance"
+    governance.mkdir()
+    (governance / "rule.md").write_text("frozen")
+    repo = MeetingRepository.create(
+        tmp_path / "ws",
+        selected_models=[("fake", "m")],
+        chair_model=("fake", "m"),
+        governance_docs=governance,
+        task_description="task",
+    )
+    manifest_path = repo.root / "identity_private/meeting_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["software_version"] = "0.7.1"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    # A 0.7.3 executor may continue a 0.7.1 meeting when its immutable
+    # governance package is unchanged.
+    cli._assert_meeting_runtime_compatible(repo, governance_docs=governance)
+
+    manifest["software_version"] = "0.7.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(PolicyNotConfiguredError, match="MEETING_SOFTWARE_VERSION_MISMATCH"):
+        cli._assert_meeting_runtime_compatible(repo, governance_docs=governance)
+
+
+def test_v071_resume_finds_bundled_exact_governance_snapshot(tmp_path):
+    from project_ensemble.paths import bundled_historical_governance_docs
+    from project_ensemble.storage.meeting import directory_digest
+
+    historical = next(
+        path for path in bundled_historical_governance_docs()
+        if path.name == "governance_frozen_2026_09_30_v071"
+    )
+    repo = MeetingRepository.create(
+        tmp_path / "ws",
+        selected_models=[("fake", "m")],
+        chair_model=("fake", "m"),
+        governance_docs=historical,
+        task_description="task",
+    )
+    session_path = repo.root / "human_private/session_configuration.json"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(
+        json.dumps({"governance_docs_path": str(tmp_path / "missing-governance")}),
+        encoding="utf-8",
+    )
+    manifest_path = repo.root / "identity_private/meeting_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["software_version"] = "0.7.1"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resolved = cli._meeting_governance_docs(
+        repo, Path(__file__).parents[1] / "docs/governance"
+    )
+    assert Path(resolved) == historical
+    assert directory_digest(resolved) == manifest["governance_digest"]
+    cli._assert_meeting_runtime_compatible(repo, governance_docs=resolved)
 
 
 def test_audit_command_is_an_explicit_non_mutating_interface(tmp_path):
@@ -888,7 +1006,7 @@ def test_ctrl_r_menu_can_go_back_and_replace_more_than_once(monkeypatch):
                     result.append({"participant_id": participant_id})
             return result
 
-    answers = iter(("1", "b", "2", "b", "1", "1", "2", "测试更换", "y", "2", "2", "2", "再次更换", "n"))
+    answers = iter(("1", "1", "2", "y", "1", "测试更换", "y", "2", "2", "2", "y", "1", "再次更换", "n"))
     monkeypatch.setattr(cli, "terminal_input", lambda _prompt: next(answers))
     monkeypatch.setattr(cli, "meeting_participant_ids", lambda _repo: list(runtime))
     monkeypatch.setattr(cli, "current_runtime_for", lambda _repo, participant: runtime[participant])
@@ -897,7 +1015,10 @@ def test_ctrl_r_menu_can_go_back_and_replace_more_than_once(monkeypatch):
         ModelDescriptor(provider_id="old", model_id="a"),
         ModelDescriptor(provider_id="new", model_id="b"),
     ])
-    cfg = SimpleNamespace(providers={"old": SimpleNamespace(enabled=True), "new": SimpleNamespace(enabled=True)})
+    cfg = SimpleNamespace(providers={
+        "old": SimpleNamespace(enabled=True, display_name="Old"),
+        "new": SimpleNamespace(enabled=True, display_name="New"),
+    })
     cli._interactive_model_replacement(repo=Repo(), cfg=cfg)
     assert replacements == [
         ("R-ONE", "new", "b", "测试更换"),
@@ -909,6 +1030,13 @@ def test_ctrl_r_menu_q_safely_stops_without_replacement(monkeypatch):
     monkeypatch.setattr(cli, "terminal_input", lambda _prompt: "q")
     with pytest.raises(KeyboardInterrupt):
         cli._interactive_model_replacement(repo=object(), cfg=object())
+
+
+def test_parallel_ctrl_r_menu_can_request_force_stop(monkeypatch):
+    monkeypatch.setattr(cli, "terminal_input", lambda _prompt: "7")
+    assert cli._interactive_model_replacement(
+        repo=object(), cfg=object(), deferred=True
+    ) == [{"kind": "force_stop"}]
 
 
 def test_ctrl_r_can_queue_model_concurrency_change_for_safe_batch_boundary(tmp_path, monkeypatch):
@@ -1032,7 +1160,7 @@ def test_openalex_failure_menu_can_record_human_search_rollback(monkeypatch, tmp
     from project_ensemble.orchestration.literature_fast import FastResearchDeskFailure
     from project_ensemble.storage.documents import ImmutableDocumentStore
 
-    answers = iter(["r", "use shorter topical searches"])
+    answers = iter(["r", "c", "use shorter topical searches"])
     monkeypatch.setattr(cli, "terminal_input", lambda _prompt: next(answers))
     monkeypatch.setattr(cli, "current_runtime_for", lambda _repo, _rid: ("deepseek", "flash"))
     repo = SimpleNamespace(

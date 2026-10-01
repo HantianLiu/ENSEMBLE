@@ -21,8 +21,11 @@ from project_ensemble.errors import (
     RepresentativeUnavailableError,
     TransientProviderError,
 )
-from project_ensemble.research.models import EvidenceSource, EvidenceUseClass, FreshnessClass
-from project_ensemble.research.retrievers import coerce_retrieval_result
+from project_ensemble.orchestration.readability_policy import (
+    structured_prose_context_from_repo, structured_result_prose_contract,
+)
+from project_ensemble.research.models import ClaimSourceDomain, EvidenceSource, EvidenceUseClass, FreshnessClass
+from project_ensemble.research.retrievers import CompositeRetriever, PolicyResearchRetriever, coerce_retrieval_result
 
 
 class ResearchExplorationService:
@@ -37,11 +40,16 @@ class ResearchExplorationService:
         self._query_locks: dict[str, threading.Lock] = {}
 
     @staticmethod
-    def _fingerprint(question: str, queries: list[str]) -> str:
+    def _fingerprint(
+        question: str, queries: list[str], source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL,
+    ) -> str:
         normalized = {
             "question": " ".join(question.casefold().split()),
             "queries": [" ".join(query.casefold().split()) for query in queries],
         }
+        # Preserve the fingerprint of legacy, general-purpose searches.
+        if source_domain != ClaimSourceDomain.GENERAL:
+            normalized["source_domain"] = source_domain.value
         return hashlib.sha256(
             json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -51,10 +59,11 @@ class ResearchExplorationService:
             return self._query_locks.setdefault(fingerprint, threading.Lock())
 
     def searches_needed(
-        self, question: str, search_queries: list[str], freshness_class: FreshnessClass
+        self, question: str, search_queries: list[str], freshness_class: FreshnessClass,
+        source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL,
     ) -> int:
         """Estimate quota consumption; a fresh meeting-local cache hit costs zero."""
-        fingerprint = self._fingerprint(question, search_queries)
+        fingerprint = self._fingerprint(question, search_queries, source_domain)
         cache_root = (
             self.repo.root / "governance_private/literature_report/exploration/cache"
             / fingerprint
@@ -71,6 +80,7 @@ class ResearchExplorationService:
         question: str,
         search_queries: list[str],
         freshness_class: FreshnessClass = FreshnessClass.VERSIONED,
+        source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL,
     ) -> dict:
         """Answer one question; caller accounts for the consumed logical searches."""
         if not question.strip() or not search_queries or any(not item.strip() for item in search_queries):
@@ -84,7 +94,7 @@ class ResearchExplorationService:
         private_path = self.repo.root / private_relative
         if private_path.exists():
             return json.loads(private_path.read_text(encoding="utf-8"))
-        fingerprint = self._fingerprint(question, search_queries)
+        fingerprint = self._fingerprint(question, search_queries, source_domain)
         with self._lock_for(fingerprint):
             if private_path.exists():
                 return json.loads(private_path.read_text(encoding="utf-8"))
@@ -100,6 +110,7 @@ class ResearchExplorationService:
                     question=question,
                     search_queries=search_queries,
                     freshness_class=freshness_class,
+                    source_domain=source_domain,
                 )
                 self.repo.docs.write_once(
                     (cache_root / f"{answer_id}.json").relative_to(self.repo.root),
@@ -124,6 +135,7 @@ class ResearchExplorationService:
                 "searches_used": searches_used,
                 "cache_hit": cache_hit,
                 "freshness_class": freshness_class.value,
+                "source_domain": source_domain.value,
             }
             self.repo.docs.write_once(
                 private_relative, json.dumps(record, ensure_ascii=False, indent=2)
@@ -171,6 +183,7 @@ class ResearchExplorationService:
         question: str,
         search_queries: list[str],
         freshness_class: FreshnessClass,
+        source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL,
     ) -> dict:
         audit_relative = (
             Path("audit_private/literature_report/exploration") / f"{answer_id}.json"
@@ -186,8 +199,14 @@ class ResearchExplorationService:
         failed_backends: list[str] = []
         for query in search_queries:
             try:
+                retriever = self.desk.retriever
+                if (source_domain == ClaimSourceDomain.ACADEMIC
+                        and isinstance(retriever, (PolicyResearchRetriever, CompositeRetriever))):
+                    retrieved = retriever.retrieve_exploratory(query, academic_only=True)
+                else:
+                    retrieved = retriever.retrieve_exploratory(query)
                 result = coerce_retrieval_result(
-                    self.desk.retriever.retrieve_exploratory(query),
+                    retrieved,
                     default_backend_ids=getattr(
                         self.desk.retriever, "backend_ids", (type(self.desk.retriever).__name__,)
                     ),
@@ -246,6 +265,10 @@ class ResearchExplorationService:
             "如果原件不可读而系统找到了替代发布页或 PDF，这些标记为 UNVERIFIED_ALTERNATIVE"
             " 的文件只是独立候选。核对题名、作者／发布机构、版本／日期、标识和相关正文；"
             "不能假定两站同版或同等权威。引用替代来源自己的 source_id，并明说原件的访问限制。"
+        )
+        preferences, disciplines = structured_prose_context_from_repo(self.repo)
+        system_text += structured_result_prose_contract(
+            preferences, disciplines, planning_scope=True,
         )
         user_text = (
             "问题：\n" + question
@@ -333,12 +356,13 @@ class ResearchExplorationService:
         ]
         retrieved_at = datetime.now(timezone.utc).isoformat()
         core = {
-            "fingerprint": self._fingerprint(question, search_queries),
+            "fingerprint": self._fingerprint(question, search_queries, source_domain),
             "question": question,
             "answer_text": answer_text,
             "status": status,
             "retrieved_at": retrieved_at,
             "freshness_class": freshness_class.value,
+            "source_domain": source_domain.value,
             "query_count": len(search_queries),
             "retrieval_conditions": {
                 "backend_ids": list(dict.fromkeys(successful_backends)),

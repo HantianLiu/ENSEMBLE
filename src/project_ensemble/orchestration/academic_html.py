@@ -20,7 +20,7 @@ from project_ensemble.orchestration.report_palette import DEFAULT_PALETTE, PALET
 
 
 _MATHJAX = "https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js"
-HTML_RENDERING_PROFILE = "ACADEMIC_HTML_MATHJAX_ANNOTATIONS_NOTES_V17"
+HTML_RENDERING_PROFILE = "ACADEMIC_HTML_MATHJAX_ANNOTATIONS_NOTES_V19"
 _INLINE_MATH = re.compile(r"(?<![\\$])\$(?!\$)([^\n$]+?)(?<!\\)\$(?!\$)|\\\((.+?)\\\)")
 _STRONG_CJK_BOUNDARY = re.compile(r"(?<=[。！？；：，、.!?;:])\*\*(?=[\u3400-\u9fffA-Za-z])")
 _CODE_SPAN = re.compile(r"(`+[^`\n]*`+)")
@@ -61,6 +61,76 @@ def _extract_reader_notes(
     return "".join(kept), notes
 
 
+def _number_reader_sections(markdown: str) -> str:
+    """Number sections nested below numbered module headings for HTML readers."""
+    chapter: int | None = None
+    subsection = subsubsection = subsubsubsection = 0
+    in_fence = False
+    output: list[str] = []
+    numbered_chapter = re.compile(r"^(\d+)[.、．]\s*(.*?)\s*$")
+    existing_section = re.compile(r"^\d+(?:\.\d+){0,3}[.、．]?\s+")
+
+    for line in markdown.splitlines(keepends=True):
+        if re.match(r"^\s*(?:```|~~~)", line):
+            in_fence = not in_fence
+            output.append(line)
+            continue
+        if in_fence:
+            output.append(line)
+            continue
+
+        match = re.match(r"^(#{1,6})\s+(.+?)(\s*)$", line.rstrip("\r\n"))
+        if not match:
+            output.append(line)
+            continue
+        level, label, trailing = len(match.group(1)), match.group(2).strip(), match.group(3)
+        if level == 2:
+            chapter = None
+            subsection = subsubsection = subsubsubsection = 0
+            output.append(line)
+            continue
+        if level == 3:
+            chapter_match = numbered_chapter.match(label)
+            if chapter_match:
+                chapter = int(chapter_match.group(1))
+                label = chapter_match.group(2)
+                subsection = subsubsection = subsubsubsection = 0
+                output.append(f"{'#' * level} {chapter}. {label}{trailing}\n" if line.endswith("\n")
+                              else f"{'#' * level} {chapter}. {label}{trailing}")
+            else:
+                chapter = None
+                output.append(line)
+            continue
+        if chapter is None or level < 4:
+            output.append(line)
+            continue
+        if level == 4 and re.match(r"^(?:表|图|Table|Figure)\s*\d", label, re.I):
+            output.append(line)
+            continue
+
+        label = existing_section.sub("", label)
+        if level == 4:
+            subsection += 1
+            subsubsection = subsubsubsection = 0
+            number = f"{chapter}.{subsection}"
+        elif level == 5:
+            if subsection == 0:
+                subsection = 1
+            subsubsection += 1
+            subsubsubsection = 0
+            number = f"{chapter}.{subsection}.{subsubsection}"
+        else:
+            if subsection == 0:
+                subsection = 1
+            if subsubsection == 0:
+                subsubsection = 1
+            subsubsubsection += 1
+            number = f"{chapter}.{subsection}.{subsubsection}.{subsubsubsection}"
+        rewritten = f"{'#' * level} {number} {label}{trailing}"
+        output.append(rewritten + ("\n" if line.endswith("\n") else ""))
+    return "".join(output)
+
+
 def normalize_reader_citation_groups(text: str) -> str:
     """Turn citation-only parenthetical runs into one ordinary numbered cite."""
     def replace(match: re.Match[str]) -> str:
@@ -71,10 +141,30 @@ def normalize_reader_citation_groups(text: str) -> str:
     return _PARENTHESIZED_CITATION_RUN.sub(replace, text)
 
 
-def _reader_cards(markdown: str) -> tuple[dict[str, str], dict[str, str]]:
+def _safe_http_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().strip("<>.,;；。")
+    if not candidate.startswith(("https://", "http://")):
+        return None
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    if not parsed.hostname or parsed.username or parsed.password:
+        return None
+    return candidate
+
+
+def _reader_cards(
+    markdown: str, reference_links: dict[str, dict[str, str]] | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, str]]]:
     """Extract only reader-visible glossary and reference text, not internal packets."""
     glossary: dict[str, str] = {}
     references: dict[str, str] = {}
+    links: dict[str, dict[str, str]] = {}
     section = ""
     for line in markdown.splitlines():
         heading = re.match(r"^##\s+(?:\d+[.、．]?\s*)?(.+?)\s*$", line)
@@ -88,7 +178,25 @@ def _reader_cards(markdown: str) -> tuple[dict[str, str], dict[str, str]]:
             glossary[match.group(1).strip()] = match.group(2).strip()
         elif section == "references" and (match := _REFERENCE_ITEM.match(line)):
             references[match.group(1)] = match.group(2).strip()
-    return glossary, references
+            reference = references[match.group(1)]
+            doi = re.search(r"\b(?:doi:\s*)?(10\.\d{4,9}/[^\s]+)", reference, re.I)
+            raw_url = re.search(r"https?://[^\s<>]+", reference)
+            target = f"https://doi.org/{doi.group(1).rstrip('.,;。')}" if doi else (
+                _safe_http_url(raw_url.group(0)) if raw_url else None
+            )
+            target = _safe_http_url(target)
+            if target:
+                links[match.group(1)] = {"source": target}
+    for number, values in (reference_links or {}).items():
+        if not isinstance(values, dict):
+            continue
+        safe_values = {
+            key: url for key, value in values.items()
+            if key in {"source", "pdf"} and (url := _safe_http_url(value))
+        }
+        if safe_values:
+            links.setdefault(str(number), {}).update(safe_values)
+    return glossary, references, links
 
 
 def _protect_math(markdown: str) -> tuple[str, dict[str, str]]:
@@ -164,6 +272,7 @@ def _protect_math(markdown: str) -> tuple[str, dict[str, str]]:
 def render_academic_review_html(
     markdown: str, *, meeting_id: str, language: str | None = None,
     palette: str = DEFAULT_PALETTE,
+    reference_links: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """Build a navigable report; MathJax typesets TeX in the browser."""
     if palette not in PALETTES:
@@ -176,6 +285,7 @@ def render_academic_review_html(
     )
     markdown = normalize_reader_citation_groups(markdown)
     reader_markdown, notes = _extract_reader_notes(markdown, callout_notes=True)
+    reader_markdown = _number_reader_sections(reader_markdown)
     protected, replacements = _protect_math(reader_markdown)
     note_replacements: dict[str, str] = {}
     nonce = hashlib.sha256(markdown.encode("utf-8")).hexdigest()[:16]
@@ -187,7 +297,7 @@ def render_academic_review_html(
             f'aria-label="查看说明"><small>[注]</small></button>'
         )
     parser = MarkdownIt("commonmark", {"html": False, "breaks": False}).enable("table")
-    glossary, references = _reader_cards(markdown)
+    glossary, references, reference_links = _reader_cards(markdown, reference_links)
     glossary_terms = sorted(glossary, key=len, reverse=True)
     glossary_pattern = re.compile("|".join(re.escape(term) for term in glossary_terms)) if glossary_terms else None
 
@@ -291,7 +401,7 @@ def render_academic_review_html(
         "tex": {"inlineMath": [[r"\(", r"\)"]], "displayMath": [[r"\[", r"\]"]]},
         "options": {"enableMenu": False},
     }, ensure_ascii=False)
-    cards = json.dumps({"glossary": glossary, "references": references, "notes": notes}, ensure_ascii=False).replace("<", "\\u003c")
+    cards = json.dumps({"glossary": glossary, "references": references, "referenceLinks": reference_links, "notes": notes}, ensure_ascii=False).replace("<", "\\u003c")
     assets = Path(__file__).resolve().parents[1] / "assets"
     annotation_css = (assets / "reader_annotations.css").read_text(encoding="utf-8")
     annotation_js = (assets / "reader_annotations.js").read_text(encoding="utf-8")
@@ -321,9 +431,11 @@ nav .toc-scroll {{ min-height:0; overflow:auto; flex:1; }}
 nav ul {{ padding:0; list-style:none; }} nav li {{ margin:.25em 0; }} nav .level-3 {{ padding-left:1em; }}
 nav a {{ color:var(--muted); text-decoration:none; }} nav a:hover {{ color:var(--accent); text-decoration:underline; }}
 main {{ min-width:0; background:var(--paper); padding:clamp(24px,5vw,76px); box-shadow:0 3px 28px #26364514; }}
-article {{ max-width:82ch; margin:auto; }} h1,h2,h3,h4 {{ line-height:1.35; break-after:avoid; scroll-margin-top:24px; }}
+article {{ max-width:82ch; margin:auto; }} h1,h2,h3,h4,h5,h6 {{ line-height:1.35; break-after:avoid; scroll-margin-top:24px; }}
 h1 {{ font-size:2.15rem; }} h2 {{ margin-top:2.5em; padding-top:.8em; border-top:1px solid var(--line); font-size:1.7rem; }}
-h3 {{ margin-top:2em; font-size:1.18rem; }} p {{ margin:1em 0; }} blockquote {{ margin:1.5em 0; padding:.5em 1.3em; background:var(--pale); border-left:4px solid {colors['mid']}; }}
+h3 {{ margin-top:2em; font-size:1.45rem; }} h4 {{ margin-top:1.8em; font-size:1.3rem; }}
+h5 {{ margin-top:1.55em; font-size:1.16rem; }} h6 {{ margin-top:1.4em; font-size:1.05rem; }}
+p {{ margin:1em 0; }} blockquote {{ margin:1.5em 0; padding:.5em 1.3em; background:var(--pale); border-left:4px solid {colors['mid']}; }}
 .abstract-section {{ margin:2em 0 2.8em; padding:1.2em 1.6em; border:1px solid var(--line); border-left:5px solid var(--accent); border-radius:8px; background:var(--pale); }}
 .abstract-section h2 {{ margin:0 0 .6em; padding:0; border:0; font-size:1.22rem; }}
 .module-section > h2 {{ color:var(--accent); border-top:2px solid var(--line); }}
@@ -342,6 +454,10 @@ pre {{ overflow-x:auto; padding:1em; background:#f3f6f8; }} .math.display {{ ove
 .drawer-controls button {{ border:0; background:var(--pale); color:var(--accent); padding:.3em .7em; border-radius:4px; cursor:pointer; }}
 .drawer-controls button[hidden] {{ display:none; }}
 .drawer-body {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
+.citation-reference {{ margin:0 0 1.4em; padding:0 0 1em; border-bottom:1px solid var(--line); }}
+.citation-reference p {{ margin:.5em 0; }}
+.citation-source-links {{ display:flex; flex-wrap:wrap; gap:.7em; font-size:.9rem; }}
+.citation-source-links a {{ color:var(--accent); }}
 @media(max-width:800px) {{ .shell {{ display:block; padding:0; }} nav {{ position:static; display:block; max-height:none; padding:1em; }} nav .toc-scroll {{ max-height:35vh; }} main {{ box-shadow:none; padding-bottom:11em; }} }}
 @media print {{ body {{ background:white; }} .shell {{ display:block; padding:0; }} nav {{ display:none; }} main {{ box-shadow:none; padding:0; }} h2 {{ break-before:page; }} a {{ color:inherit; }} }}
 {annotation_css}
@@ -416,14 +532,39 @@ function renderReaderCard() {{
   const card = readerStack[readerStack.length - 1];
   if (!card) {{ drawer.hidden = true; return; }}
   const key = card.key;
-  const value = card.kind === 'term' ? cards.glossary[key] : card.kind === 'note' ? cards.notes[key] : referenceNumbers(key).map(number =>
-    '[' + number + '] ' + (cards.references[number] || '当前报告没有对应的参考文献条目')
-  ).join('\\n\\n');
+  const citationRefs = card.kind === 'citation' ? referenceNumbers(key) : [];
+  const value = card.kind === 'term' ? cards.glossary[key] : card.kind === 'note' ? cards.notes[key] : '';
   document.getElementById('drawer-title').textContent = card.kind === 'term' ? key : card.kind === 'note' ? '说明' : '引文 ' + key;
   drawerBody.replaceChildren();
-  const paragraph = document.createElement('p');
-  appendLinkedText(paragraph, value || '当前报告没有可展示的对应条目；请核对参考文献与证据包。', card.kind === 'term' ? key : null);
-  drawerBody.appendChild(paragraph);
+  if (card.kind === 'citation') {{
+    for (const number of citationRefs) {{
+      const entry = document.createElement('section');
+      entry.className = 'citation-reference';
+      const paragraph = document.createElement('p');
+      appendLinkedText(paragraph, '[' + number + '] ' + (cards.references[number] || '当前报告没有对应的参考文献条目'), null);
+      entry.appendChild(paragraph);
+      const links = cards.referenceLinks[number] || {{}};
+      const actions = document.createElement('div');
+      actions.className = 'citation-source-links';
+      for (const [field, label] of [['pdf', '打开原文 PDF ↗'], ['source', '打开来源网页 ↗']]) {{
+        const href = links[field];
+        if (!href || (field === 'source' && href === links.pdf)) continue;
+        const anchor = document.createElement('a');
+        anchor.href = href;
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+        anchor.textContent = label;
+        actions.appendChild(anchor);
+      }}
+      if (actions.childElementCount) entry.appendChild(actions);
+      drawerBody.appendChild(entry);
+    }}
+    if (!citationRefs.length) drawerBody.textContent = '当前报告没有可展示的对应条目；请核对参考文献与证据包。';
+  }} else {{
+    const paragraph = document.createElement('p');
+    appendLinkedText(paragraph, value || '当前报告没有可展示的对应条目；请核对参考文献与证据包。', card.kind === 'term' ? key : null);
+    drawerBody.appendChild(paragraph);
+  }}
   drawerBack.hidden = readerStack.length < 2;
   drawer.hidden = false;
   if (window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([drawer]);

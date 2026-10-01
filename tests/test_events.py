@@ -35,3 +35,17 @@ def test_parallel_model_lanes_preserve_event_hash_chain(tmp_path):
 
     assert log.verify()
     assert len(path.read_text().splitlines()) == 40
+
+
+def test_parallel_repository_instances_share_one_event_chain(tmp_path):
+    path = tmp_path / "events.jsonl"
+    logs = [HashChainEventLog(path) for _ in range(4)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(logs[index % 4].append, "EVENT", {"index": index}, actor="test")
+            for index in range(80)
+        ]
+        for future in futures:
+            future.result()
+    assert logs[0].verify()
+    assert len(path.read_text().splitlines()) == 80

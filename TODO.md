@@ -187,6 +187,17 @@
 
 ## Engineering work that is safe now
 
+- [ ] Add a meeting-initialization **automation authority** choice with three
+      levels. Level 1 asks the Human to decide substantive research-content
+      questions while attempting automatic technical recovery first. Level 2
+      grants the academic Writer the maximum delegated authority over eligible
+      discretionary decisions. Level 3 routes eligible decisions to an
+      explicitly configured third-party decision model. All levels preserve
+      explicit Human hard constraints and non-delegable governance rules;
+      technical faults remain a separate recovery path handled by Technician
+      before asking the Human. Define which decisions are eligible at each
+      level, what context the third-party model may see, and the fallback when
+      that model is unavailable before implementing this setting.
 - [ ] Next version: make every live task table resolve the effective runtime through
       the audited model-replacement ledger. The immutable initialization registry
       remains historical provenance, but the UI must label future calls with the

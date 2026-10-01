@@ -19,7 +19,7 @@ from typing import Protocol, Sequence, TextIO
 from project_ensemble.domain import MeetingPhase
 from project_ensemble.interface_language import ui_text
 from project_ensemble.user_settings import interface_language
-from project_ensemble.errors import ModelReplacementRequested
+from project_ensemble.errors import ForcedModelReplacementRequested, ModelReplacementRequested
 from project_ensemble.runtime.labels import persona_display_label
 from project_ensemble.runtime.telemetry import TokenTelemetry
 from project_ensemble.runtime.terminal_style import (
@@ -205,9 +205,15 @@ class ProgressReporter(Protocol):
 
     def raise_if_control_requested(self) -> None: ...
 
+    def raise_if_force_control_requested(self) -> None: ...
+
+    def force_stop_active_calls(self) -> None: ...
+
     def defer_model_replacement(self): ...
 
     def control_request_pending(self) -> bool: ...
+
+    def force_control_pending(self) -> bool: ...
 
     def interactive_menu(self): ...
 
@@ -343,11 +349,20 @@ class NullProgressReporter:
     def raise_if_control_requested(self) -> None:
         pass
 
+    def raise_if_force_control_requested(self) -> None:
+        pass
+
+    def force_stop_active_calls(self) -> None:
+        pass
+
     @contextmanager
     def defer_model_replacement(self):
         yield
 
     def control_request_pending(self) -> bool:
+        return False
+
+    def force_control_pending(self) -> bool:
         return False
 
     @contextmanager
@@ -456,6 +471,8 @@ class ConsoleProgressReporter:
         self._source_ids: dict[str, str] = {}
         self._last_source_scan = 0.0
         self._output_lock = threading.RLock()
+        self._terminal_input_lock = threading.RLock()
+        self._control_listener_lock = threading.RLock()
         self._tasks: dict[str, _LiveTask] = {}
         self._rendered_table_lines = 0
         self._last_table_render = 0.0
@@ -473,6 +490,9 @@ class ConsoleProgressReporter:
         self._control_thread: threading.Thread | None = None
         self._control_stop = threading.Event()
         self._control_requested = threading.Event()
+        self._force_control_requested = threading.Event()
+        self._safe_exit_requested = threading.Event()
+        self._control_menu_thread: threading.Thread | None = None
         self._defer_control_to_main_thread = False
         self._menu_active = False
         self._control_original_termios = None
@@ -683,7 +703,7 @@ class ConsoleProgressReporter:
                     _fit(
                         f"{('Progress' if self.language == 'en' else '进度')} · {batch_title} · {progress} · {('Running' if self.language == 'en' else '运行')} {running}"
                         + workload
-                        + (" · Ctrl+C interrupt / Ctrl+R models & controls" if self.language == "en" else " · Ctrl+C 中断 / Ctrl+R 模型与运行参数"),
+                        + (" · Ctrl+C stop / Ctrl+R menu / Ctrl+P force stop" if self.language == "en" else " · Ctrl+C 中断 / Ctrl+R 菜单 / Ctrl+P 强停"),
                         self.width,
                     ),
                     CYAN,
@@ -968,8 +988,8 @@ class ConsoleProgressReporter:
                     f"{'已归档来源' if fast_desk else '已查阅来源'}：文献 {literature} · 网页 {web} │ "
                 )
             hint = _fit(source_prefix + (
-                "Keys: Ctrl+C stop safely · Ctrl+R models and controls" if self.language == "en"
-                else "快捷键：Ctrl+C 安全中断 · Ctrl+R 模型与运行参数"
+                "Keys: Ctrl+C stop safely · Ctrl+R menu · Ctrl+P force stop" if self.language == "en"
+                else "快捷键：Ctrl+C 安全中断 · Ctrl+R 菜单 · Ctrl+P 强停"
             ), self.width - 3)
             lines.append(styled(f"│ {hint}", DIM, enabled=self.color))
         lines.append(styled("└" + "─" * (self.width - 1), CYAN, enabled=self.color))
@@ -997,7 +1017,7 @@ class ConsoleProgressReporter:
             return [styled(
                 _fit(
                     f"进度 · {short_title} · {progress} · 运行 {running}"
-                    + scope + " · Ctrl+C 中断 / Ctrl+R 模型与参数",
+                    + scope + " · Ctrl+C 中断 / Ctrl+R 菜单 / Ctrl+P 强停",
                     self.width,
                 ),
                 CYAN,
@@ -1005,30 +1025,34 @@ class ConsoleProgressReporter:
             )]
         return lines
 
-    def start_control_listener(self) -> None:
-        """Listen for Ctrl-R while provider calls are running.
+    def start_control_listener(self, *, _resume: bool = False) -> None:
+        with self._control_listener_lock:
+            self._start_control_listener_locked(_resume=_resume)
 
-        The listener only records a request.  It never mutates meeting state or
-        performs a replacement from its background thread; the main execution
-        path handles the request at a durable provider-call boundary.
+    def _start_control_listener_locked(self, *, _resume: bool = False) -> None:
+        """Listen for terminal controls while provider calls are running.
+
+        A Human menu temporarily suspends the reader without invalidating the
+        ownership references held by in-flight calls.  ``_resume`` rearms it
+        without creating an extra owner in the menu's short-lived thread.
         """
 
         if not self.live:
             return
         with self._output_lock:
-            if self._menu_active:
-                return
-            owners = getattr(self._control_owners, "generations", [])
-            owners.append(self._control_generation)
-            self._control_owners.generations = owners
-            if self._control_thread is not None or self._control_users:
+            if not _resume:
+                owners = getattr(self._control_owners, "generations", [])
+                owners.append(self._control_generation)
+                self._control_owners.generations = owners
                 self._control_users += 1
+            if self._menu_active or self._control_thread is not None or not self._control_users:
                 return
-            self._control_users = 1
         try:
             stream = sys.stdin
             if not stream.isatty():
-                self._control_users = 0
+                if not _resume:
+                    self._control_users -= 1
+                    self._control_owners.generations.pop()
                 return
             fd = stream.fileno()
             original = termios.tcgetattr(fd)
@@ -1040,7 +1064,9 @@ class ConsoleProgressReporter:
             edited[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSANOW, edited)
         except (AttributeError, OSError, termios.error, ValueError):
-            self._control_users = 0
+            if not _resume:
+                self._control_users -= 1
+                self._control_owners.generations.pop()
             return
         self._control_original_termios = (fd, original)
         self._control_stop.clear()
@@ -1055,9 +1081,25 @@ class ConsoleProgressReporter:
                         continue
                     value = os.read(fd, 1)
                     if value == b"\x12":  # Ctrl-R
+                        if callable(getattr(self, "immediate_control_callback", None)):
+                            if self._control_menu_thread is None or not self._control_menu_thread.is_alive():
+                                self._control_requested.set()
+                                self._control_menu_thread = threading.Thread(
+                                    target=self._run_immediate_control_menu,
+                                    name="ensemble-immediate-control-menu",
+                                    daemon=True,
+                                )
+                                self._control_menu_thread.start()
+                            continue
                         if not self._control_requested.is_set():
                             self._control_requested.set()
-                            self.info("已收到 Ctrl+R；即将打开模型与运行参数界面，已发出的请求继续完成")
+                            self.info(
+                                "Ctrl+R received; the model menu will open at the next safe boundary."
+                                if self.language == "en" else
+                                "已收到 Ctrl+R；将在下一安全边界打开模型菜单"
+                            )
+                    elif value == b"\x10":  # Ctrl-P
+                        self.force_stop_active_calls()
             except (OSError, ValueError):
                 pass
 
@@ -1072,7 +1114,36 @@ class ConsoleProgressReporter:
         with self._output_lock:
             self._render_live_table_locked(force=True)
 
+    def _run_immediate_control_menu(self) -> None:
+        callback = getattr(self, "immediate_control_callback", None)
+        if not callable(callback):
+            return
+        try:
+            with self.interactive_menu():
+                callback()
+        except KeyboardInterrupt:
+            # A menu's q choice requests a safe exit; it does not discard an
+            # already-running provider response as Ctrl+P does.
+            self._safe_exit_requested.set()
+            self.info(
+                "Safe exit requested; waiting for the active call boundary."
+                if self.language == "en" else
+                "已请求安全退出；等待当前在途调用到达可保存边界"
+            )
+        except Exception as exc:
+            self.info(
+                f"Model menu failed: {type(exc).__name__}: {exc}"
+                if self.language == "en" else
+                f"模型菜单未能完成：{type(exc).__name__}: {exc}；原会议继续运行"
+            )
+        finally:
+            self._control_requested.clear()
+
     def stop_control_listener(self) -> None:
+        with self._control_listener_lock:
+            self._stop_control_listener_locked()
+
+    def _stop_control_listener_locked(self) -> None:
         with self._output_lock:
             owners = getattr(self._control_owners, "generations", [])
             if not owners:
@@ -1080,10 +1151,8 @@ class ConsoleProgressReporter:
             generation = owners.pop()
             if generation != self._control_generation:
                 return
-            if self._control_thread is None:
-                return
             self._control_users = max(0, self._control_users - 1)
-            if self._control_users:
+            if self._control_users or self._control_thread is None:
                 return
             thread = self._control_thread
             self._control_stop.set()
@@ -1102,6 +1171,10 @@ class ConsoleProgressReporter:
             _ACTIVE_CONTROL_REPORTERS.discard(self)
 
     def shutdown_control_listener(self) -> None:
+        with self._control_listener_lock:
+            self._shutdown_control_listener_locked()
+
+    def _shutdown_control_listener_locked(self) -> None:
         """Unconditionally release stdin and restore its original TTY mode.
 
         ``start``/``stop`` are reference-counted because parallel provider
@@ -1115,6 +1188,7 @@ class ConsoleProgressReporter:
             if self._control_thread is None:
                 self._control_users = 0
                 self._control_requested.clear()
+                self._force_control_requested.clear()
                 with _ACTIVE_CONTROL_REPORTERS_LOCK:
                     _ACTIVE_CONTROL_REPORTERS.discard(self)
                 return
@@ -1124,10 +1198,36 @@ class ConsoleProgressReporter:
             self._control_owners.generations = owners
         self.stop_control_listener()
         self._control_requested.clear()
+        self._force_control_requested.clear()
+
+    def raise_if_force_control_requested(self) -> None:
+        if self._force_control_requested.is_set():
+            # Do not clear the flag in worker threads: all in-flight calls
+            # must observe the same forced handoff before the menu opens.
+            if threading.current_thread() is threading.main_thread():
+                self.shutdown_control_listener()
+            raise ForcedModelReplacementRequested("Human abandoned unfinished model response")
+
+    def force_stop_active_calls(self) -> None:
+        """Request an explicit forced handoff from a parallel-batch menu."""
+
+        self._force_control_requested.set()
+        self.info(
+            "Stopping active model calls; saved results stay intact. Choose a replacement after this batch unwinds."
+            if self.language == "en" else
+            "正在中止当前在途模型调用；已落盘结果保留。批次安全收尾后请选择替代模型"
+        )
 
     def raise_if_control_requested(self) -> None:
+        if self._safe_exit_requested.is_set() and threading.current_thread() is threading.main_thread():
+            self.shutdown_control_listener()
+            raise KeyboardInterrupt
+        if callable(getattr(self, "immediate_control_callback", None)):
+            self.raise_if_force_control_requested()
+            return
         if self._defer_control_to_main_thread and threading.current_thread() is not threading.main_thread():
             return
+        self.raise_if_force_control_requested()
         if self._control_requested.is_set():
             self._control_requested.clear()
             # Restore canonical input before the exception reaches the CLI.
@@ -1147,39 +1247,65 @@ class ConsoleProgressReporter:
             self._defer_control_to_main_thread = False
 
     def control_request_pending(self) -> bool:
+        if callable(getattr(self, "immediate_control_callback", None)):
+            return False
         return self._control_requested.is_set()
+
+    def safe_exit_pending(self) -> bool:
+        return self._safe_exit_requested.is_set()
+
+    def force_control_pending(self) -> bool:
+        return self._force_control_requested.is_set()
 
     @contextmanager
     def interactive_menu(self):
         """Give stdin to Human while background calls keep recording progress."""
 
-        self.shutdown_control_listener()
-        with self._output_lock:
-            self._clear_live_table_locked()
-            self._menu_active = True
-        try:
-            yield
-        finally:
-            with self._output_lock:
-                self._menu_active = False
-                self._render_live_table_locked(force=True)
-            self.start_control_listener()
+        with self._terminal_input_lock:
+            with self._control_listener_lock:
+                with self._output_lock:
+                    self._clear_live_table_locked()
+                    self._menu_active = True
+                    self._control_requested.clear()
+                    thread = self._control_thread
+                    self._control_thread = None
+                    if thread is not None:
+                        self._control_stop.set()
+                if thread is not None:
+                    thread.join(timeout=0.5)
+                    original = self._control_original_termios
+                    if original is not None:
+                        fd, attributes = original
+                        try:
+                            termios.tcsetattr(fd, termios.TCSADRAIN, attributes)
+                        except (OSError, termios.error, ValueError):
+                            pass
+                    self._control_original_termios = None
+                    self._controls_active = False
+            try:
+                yield
+            finally:
+                with self._output_lock:
+                    self._menu_active = False
+                    self._render_live_table_locked(force=True)
+                self.start_control_listener(_resume=True)
 
     @contextmanager
     def consultation_display(self):
         """Keep model progress from redrawing over a Human consultation."""
-        with self._output_lock:
-            self._clear_live_table_locked()
-            self._menu_active = True
-        try:
-            yield
-        finally:
+        with self._terminal_input_lock:
             with self._output_lock:
-                self._menu_active = False
-                # The next workflow event will establish its own fresh frame.
-                # Repainting the old batch here would leave stale rows above
-                # the Human's finished consultation.
-                self._rendered_table_lines = 0
+                self._clear_live_table_locked()
+                self._menu_active = True
+            try:
+                yield
+            finally:
+                with self._output_lock:
+                    self._menu_active = False
+                    # The next workflow event will establish its own fresh frame.
+                    # Repainting the old batch here would leave stale rows above
+                    # the Human's finished consultation.
+                    self._rendered_table_lines = 0
 
     def _render_live_table_locked(self, *, force: bool = False) -> None:
         if self._menu_active or not self.live or not self._tasks:

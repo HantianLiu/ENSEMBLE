@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 import pytest
 
+from project_ensemble.errors import ForcedModelReplacementRequested
 from project_ensemble.runtime.model_lanes import (
     run_bounded_model_lanes,
     run_bounded_representative_lanes,
@@ -105,6 +106,43 @@ def test_live_representative_lane_reassigns_unstarted_call_after_ctrl_r():
     )
     assert result == ["R-1", "R-2"]
     assert second_started.is_set()
+
+
+def test_parallel_force_stop_does_not_start_queued_model_call():
+    first_started = threading.Event()
+    forced = threading.Event()
+    started: list[int] = []
+
+    class Progress:
+        def control_request_pending(self):
+            return first_started.is_set() and not forced.is_set()
+
+        def force_control_pending(self):
+            return forced.is_set()
+
+        @contextmanager
+        def interactive_menu(self):
+            yield
+
+        @contextmanager
+        def defer_model_replacement(self):
+            yield
+
+        def live_batch_control_callback(self):
+            forced.set()
+
+    def worker(value):
+        started.append(value)
+        first_started.set()
+        assert forced.wait(timeout=2)
+        return value
+
+    with pytest.raises(ForcedModelReplacementRequested):
+        run_bounded_model_lanes(
+            {("provider", "model"): [1, 2]}, worker,
+            lambda *_args: 1, progress=Progress(),
+        )
+    assert started == [1]
 
 
 def test_representative_lanes_parallelize_models_but_serialize_same_model():

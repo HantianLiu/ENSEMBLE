@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import re
+import queue
+import threading
+from contextlib import contextmanager
+from typing import Any
+from collections.abc import Callable, Iterator
 
 import httpx
 from project_ensemble.errors import (
@@ -8,6 +13,103 @@ from project_ensemble.errors import (
 )
 
 TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+@contextmanager
+def interruptible_stream_open(
+    stream: Any,
+    on_progress: Callable[[str, int, int], None] | None,
+) -> Iterator[httpx.Response]:
+    """Poll the Human control while a provider has not sent HTTP headers."""
+
+    if on_progress is None:
+        with stream as response:
+            yield response
+        return
+    ready: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    abandoned = threading.Event()
+    handoff_lock = threading.Lock()
+
+    def open_stream() -> None:
+        try:
+            response = stream.__enter__()
+            with handoff_lock:
+                if abandoned.is_set():
+                    stream.__exit__(None, None, None)
+                else:
+                    ready.put(("response", response))
+        except BaseException as exc:
+            if not abandoned.is_set():
+                ready.put(("error", exc))
+
+    threading.Thread(target=open_stream, name="ensemble-sse-open", daemon=True).start()
+    try:
+        while True:
+            on_progress("heartbeat", 0, 0)
+            try:
+                kind, value = ready.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if kind == "error":
+                if isinstance(value, BaseException):
+                    raise value
+                raise RuntimeError("HTTP stream opener returned an invalid error")
+            break
+    except BaseException:
+        with handoff_lock:
+            abandoned.set()
+            if not ready.empty():
+                kind, _value = ready.get_nowait()
+                if kind == "response":
+                    stream.__exit__(None, None, None)
+        raise
+    try:
+        on_progress("heartbeat", 0, 0)
+        yield value  # type: ignore[misc]
+    finally:
+        stream.__exit__(None, None, None)
+
+
+def interruptible_stream_lines(
+    response: httpx.Response,
+    on_progress: Callable[[str, int, int], None] | None,
+) -> Iterator[str]:
+    """Keep a silent SSE body from trapping Ctrl-R until the HTTP read timeout.
+
+    The socket reader is isolated in a daemon thread. On forced handoff the
+    caller leaves the response context, closing the local connection; partial
+    text is discarded by the normal invocation boundary.
+    """
+
+    if on_progress is None:
+        yield from response.iter_lines()
+        return
+    lines: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def read() -> None:
+        try:
+            for line in response.iter_lines():
+                lines.put(("line", line))
+        except Exception as exc:
+            lines.put(("error", exc))
+        finally:
+            lines.put(("done", None))
+
+    threading.Thread(target=read, name="ensemble-sse-reader", daemon=True).start()
+    while True:
+        on_progress("heartbeat", 0, 0)
+        try:
+            kind, value = lines.get(timeout=0.25)
+        except queue.Empty:
+            continue
+        if kind == "line":
+            yield str(value)
+        elif kind == "error":
+            if isinstance(value, BaseException):
+                raise value
+            raise RuntimeError("HTTP stream reader returned an invalid error")
+        else:
+            return
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

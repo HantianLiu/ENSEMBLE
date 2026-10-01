@@ -119,7 +119,7 @@
       "type": "string"
     },
     "software_version": {
-      "default": "0.7.1",
+      "default": "0.7.3",
       "title": "Software Version",
       "type": "string"
     },

@@ -102,7 +102,7 @@ class _AppServer:
         self._reader.start()
         self.request("initialize", {
             "clientInfo": {
-                "name": "project_ensemble", "title": "Project ENSEMBLE", "version": "0.7.0",
+                "name": "project_ensemble", "title": "Project ENSEMBLE", "version": "0.7.3",
             }
         }, timeout=20)
         self.send({"method": "initialized", "params": {}})
@@ -129,16 +129,22 @@ class _AppServer:
             raise TransientProviderError("Codex App Server connection closed") from exc
 
     def next_event(self, deadline: float) -> dict:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TransientProviderError("Codex App Server did not respond before timeout")
-        try:
-            event = self._events.get(timeout=remaining)
-        except queue.Empty as exc:
-            raise TransientProviderError("Codex App Server did not respond before timeout") from exc
-        if event is None:
-            raise TransientProviderError("Codex App Server closed before completing the request")
-        return event
+        while True:
+            poll = getattr(self, "_poll_callback", None)
+            if poll is not None:
+                poll()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TransientProviderError("Codex App Server did not respond before timeout")
+            try:
+                event = self._events.get(timeout=min(remaining, 0.25) if poll else remaining)
+            except queue.Empty as exc:
+                if poll is not None and time.monotonic() < deadline:
+                    continue
+                raise TransientProviderError("Codex App Server did not respond before timeout") from exc
+            if event is None:
+                raise TransientProviderError("Codex App Server closed before completing the request")
+            return event
 
     def request(self, method: str, params: dict, *, timeout: float | None = None) -> dict:
         request_id = self._next_id
@@ -258,6 +264,8 @@ class CodexSubscriptionAdapter(ProviderAdapter):
                 self.command, self.timeout_seconds, cwd, self.codex_home,
                 model_context_window=self.model_input_token_limits.get(request.model_id),
             ) as server:
+                if on_progress is not None:
+                    server._poll_callback = lambda: on_progress("heartbeat", 0, 0)
                 self._check_isolation_and_auth(server)
                 thread_result = server.request("thread/start", {
                     "model": request.model_id,

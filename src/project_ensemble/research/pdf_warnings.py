@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ class PdfWarningSummary:
     first_duplicate_length: str | None = None
     broken_cmap_line_count: int = 0
     first_broken_cmap_line: str | None = None
+    wrong_pointing_object_count: int = 0
+    first_wrong_pointing_object: str | None = None
 
 
 class _RecoverablePdfWarningFilter(logging.Filter):
@@ -41,15 +44,24 @@ class _RecoverablePdfWarningFilter(logging.Filter):
             if self.summary.first_broken_cmap_line is None:
                 self.summary.first_broken_cmap_line = message
             return False
+        if (record.name == "pypdf._reader"
+                and re.fullmatch(
+                    r"Ignoring wrong pointing object \d+ \d+ \(offset -?\d+\)",
+                    message,
+                )):
+            self.summary.wrong_pointing_object_count += 1
+            if self.summary.first_wrong_pointing_object is None:
+                self.summary.first_wrong_pointing_object = message
+            return False
         return True
 
 
 @contextmanager
-def capture_duplicate_pdf_length_warnings() -> Iterator[PdfWarningSummary]:
+def capture_recoverable_pdf_warnings() -> Iterator[PdfWarningSummary]:
     """Count known recoverable parser warnings without muting other errors."""
     summary = PdfWarningSummary()
     loggers = [logging.getLogger(name) for name in (
-        "pypdf.generic._data_structures", "pypdf._cmap",
+        "pypdf.generic._data_structures", "pypdf._cmap", "pypdf._reader",
     )]
     filter_ = _RecoverablePdfWarningFilter(summary)
     for logger in loggers:

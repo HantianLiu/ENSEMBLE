@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from project_ensemble.domain import ModelDescriptor
 from project_ensemble.providers.base import ProviderAdapter
 from project_ensemble.storage.meeting import MeetingRepository
-from project_ensemble.runtime.model_replacements import replacement_model_pairs
+from project_ensemble.runtime.model_replacements import active_replacement_model_pairs
 from project_ensemble.runtime.research_fallbacks import ResearchFallbacks
 from project_ensemble.runtime.model_fallback_order import ModelFallbackOrderService
 
@@ -179,7 +179,7 @@ def add_replacement_output_budgets(
     """
 
     result = dict(budgets)
-    targets = (replacement_model_pairs(repo) | ResearchFallbacks(repo).target_models()
+    targets = (active_replacement_model_pairs(repo) | ResearchFallbacks(repo).target_models()
                | ModelFallbackOrderService(repo).target_models())
     for key in sorted(targets - set(result)):
         provider_id, model_id = key
@@ -212,7 +212,7 @@ def add_replacement_input_context_budgets(
     """Apply the frozen input safety rule to newly introduced runtimes."""
 
     result = dict(budgets)
-    targets = (replacement_model_pairs(repo) | ResearchFallbacks(repo).target_models()
+    targets = (active_replacement_model_pairs(repo) | ResearchFallbacks(repo).target_models()
                | ModelFallbackOrderService(repo).target_models())
     for key in sorted(targets - set(result)):
         provider_id, model_id = key

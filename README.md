@@ -2,7 +2,7 @@
 
 **当前版本 / Current version:** [中文说明](README_v071.md) · [English guide](README_v071.en.md)
 
-Project ENSEMBLE 是一个多模型研究与审议工作台。当前 `v0.7.1` 是供反馈的早期
+Project ENSEMBLE 是一个多模型研究与审议工作台。当前 `v0.7.3` 是供反馈的早期
 预览版：它支持文献调研的简易与完整流程、单项命题核实、议事会议和学术重绘。
 议事会议让不同模型对规则、标准或提示词委托逐条提案、质疑和表决，交付可审计的
 规范性文本；它不负责执行该委托，也不默认撰写文献综述。
@@ -11,7 +11,7 @@ Project ENSEMBLE 是一个多模型研究与审议工作台。当前 `v0.7.1` �
 下面较长的英文内容主要记录旧版背景和设计沿革。
 
 Project ENSEMBLE is a multi-model research and deliberation workbench. Version
-`0.7.1` is an early feedback preview, not an unattended research service.
+`0.7.3` is an early feedback preview, not an unattended research service.
 Deliberation has independent models propose, challenge, and vote on clauses for
 rules or prompt briefs. Its output is an auditable normative document, not
 execution of the brief or a literature review. The Audit meeting runner is not
@@ -21,10 +21,11 @@ code is [MIT-licensed](LICENSE); the bundled font has a
 [separate license](THIRD_PARTY_NOTICES.md). Start with the current-version guide
 linked above; the longer English material below also retains legacy design context.
 
-Version **0.7.1**. For the version-specific quick start and current trial limits,
+Version **0.7.3**. For the version-specific quick start and current trial limits,
 read [`README_v071.md`](README_v071.md). This sibling distribution installs the
 canonical `ensemble` command; the previous v0.7.0 runtime is now invoked as
-`ensemble-old`. `ensemble-v071` remains a compatibility alias for v0.7.1.
+`ensemble-old`. `ensemble-v071` remains a compatibility alias whose name reflects
+the original v0.7.1 distribution; it invokes this release's runtime.
 Run this checkout's `scripts/ensemble` directly, or install it into a separate
 virtual environment:
 
@@ -50,12 +51,12 @@ chapters. Research Desk gathers evidence; science review has a primary model
 and a distinct failure-only backup model.
 This mode has no Chair; it
 does not replace or migrate the ordinary workflow.
-The policy is frozen per new meeting; existing v0.7.0 meetings retain their old
+The v0.7.1 writing policy is frozen per new meeting; existing v0.7.0 meetings retain their old
 flow and should be resumed with `ensemble-old`. The remainder of this README
 documents the inherited v0.7.0 interface and legacy workflows; historical
 `ensemble-v07 ...` examples below refer to that compatibility alias, whose
 canonical name is now `ensemble-old ...`. In this checkout, bare `ensemble`
-always starts v0.7.1.
+always starts v0.7.3.
 
 The inherited v0.7.0 distribution used to install `ensemble`; that runtime is
 now exposed as `ensemble-old`, with `ensemble-v07` retained as a compatible
@@ -184,7 +185,7 @@ Cost is optimized only inside an acceptable epistemic and procedural envelope. W
 Several adopted next-version rules are not yet executable and code must not pretend
 otherwise. See `TODO.md`. Important boundaries include dynamic pivotal-missing-ballot
 handling, two-level per-item malformed-output recovery, backup-Chair transfer, and the
-full Audit/Correction state machines. The current v0.7.1 release hides Audit
+full Audit/Correction state machines. The current v0.7.3 release hides Audit
 meeting creation and the `run-audit` command; existing Audit records remain
 unchanged until a future runner is available. Earlier versions exposed a
 non-mutating fail-fast interface.
@@ -220,7 +221,7 @@ ensemble "会议标题"       # 标题唯一时可跨目录恢复
 
 The example uses `governance_docs = "@package"`, which resolves to the governance
 package shipped in the source checkout or installed wheel. It therefore needs no
-machine-specific absolute path. To invoke v0.7.0 from any working directory, set only
+machine-specific absolute path. To invoke this release from any working directory, set only
 the configuration location:
 
 ```bash
@@ -272,7 +273,7 @@ missing that dependency can still search evidence-packet metadata but must not
 claim to have read PDF full text.
 New IDs use `AU-` for Audit, `LR-` for literature-review or research-only meetings,
 `DL-` for normative deliberation, and `SR-` for scholarly rendering. `VR-` is reserved
-for a future one-shot verification meeting type; v0.7.0 does not yet run that procedure.
+for a future one-shot verification meeting type; v0.7.3 does not yet run that procedure.
 Existing `M-` meetings retain their IDs and remain discoverable and resumable. The
 explicit `ensemble-v07 start` command remains available, as do
 `run-general`, `run-report`, `run-render`, and `run-research`; existing automation and old resume
@@ -307,40 +308,40 @@ and show them when executed. The ID-first filename makes shell completion unambi
 Older `resume_<meeting-id>.sh` helpers remain usable and are not removed; `resume.sh`
 is refreshed at the next interruption.
 
-### Importing an unfinished v0.6 meeting
+### Importing an unfinished v0.6 meeting into this release
 
-The v0.7.0 runner does not write into a v0.6 meeting. To continue a v0.6 meeting
-under v0.7.0, stop the old process and import a verified copy into a **new** path:
+The v0.7.3 runner does not write into a v0.6 meeting. Stop the old process and
+import a verified copy into a **new** path:
 
 ```bash
-ensemble-v07 migrate-v06 \
+ensemble migrate-v06 \
   --meeting /absolute/path/to/M-OLDID \
-  --output /absolute/path/to/M-OLDID-v07 \
-  --config /absolute/path/to/v07/ensemble.toml \
+  --output /absolute/path/to/M-OLDID-v073 \
+  --config /absolute/path/to/v073/ensemble.toml \
   --dry-run
-ensemble-v07 migrate-v06 \
+ensemble migrate-v06 \
   --meeting /absolute/path/to/M-OLDID \
-  --output /absolute/path/to/M-OLDID-v07 \
-  --config /absolute/path/to/v07/ensemble.toml
-ensemble-v07 open /absolute/path/to/M-OLDID-v07
+  --output /absolute/path/to/M-OLDID-v073 \
+  --config /absolute/path/to/v073/ensemble.toml
+ensemble open /absolute/path/to/M-OLDID-v073
 ```
 
-Use a separate v0.7.0 configuration file; the importer refuses the path frozen
+Use a separate v0.7.3 configuration file; the importer refuses the path frozen
 as the old meeting's v0.6 configuration. The import checks the legacy event hash
 chain, a stopped meeting run lock, manifest consistency, configured providers,
 every source file, and local symlinks.
 It copies frozen submissions and documents without rewriting them, then records
-the v0.7.0 governance digest, configuration snapshot, original task prompt, and
+the v0.7.1 governance digest, configuration snapshot, original task prompt, and
 migration provenance in the copy. The original directory remains available for
 v0.6 rollback. The copied meeting keeps its meeting ID, so open it by **path**;
 the installation-local ID index can point to only one copy at a time. Rules for
-future, unfinished steps are those of v0.7.0; already frozen decisions are not
-re-voted. Audit meetings cannot be imported because v0.7.0 has no Audit runner.
+future, unfinished steps follow the v0.7.1 governance baseline; already frozen decisions are not
+re-voted. Audit meetings cannot be imported because v0.7.3 has no Audit runner.
 The import makes no model calls and never resumes automatically. If a resumed
-legacy artifact requires a procedure that v0.7.0 cannot interpret, execution
+legacy artifact requires a procedure that v0.7.3 cannot interpret, execution
 pauses and the original v0.6 meeting remains intact.
 
-`ensemble-v07 start` performs live model discovery and creates the durable,
+`ensemble-old start` performs live model discovery and creates the durable,
 compartmentalized meeting workspace. The notification address may be left blank,
 and `[notifications.email].enabled` may remain `false`; if human attention is
 later required, ENSEMBLE records `NOTIFICATION_SKIPPED` in the append-only event
@@ -441,6 +442,11 @@ begin the same independent ballot window together. Dependent ballot rounds and
 sequential amendments remain sequential. This can reduce waiting time but may
 lower provider prompt-cache hit rates or hit provider concurrency limits. The
 default leaves existing configured, discovered, or safe-fallback caps unchanged.
+Initialization also accepts a single explicit simultaneous-call cap from 1 to
+16 for every selected model, including the Writer and Research Desk. Press
+Enter to retain the automatically configured limits. This input control is
+separate from the number of independent Research Desk question groups; Ctrl+R
+can adjust one model's cap later without changing the frozen starting record.
 
 Deliberation meetings also freeze a Human-selected decision-rigor mode. The
 default **strict** mode retains the established `ceil(3*N_ACTIVE/4)` high
@@ -742,10 +748,12 @@ ensemble-v07 open /absolute/path/to/M-XXXXXXXX
 
 ### 在会议中途更换模型
 
-交互式运行的任务表底部会常驻显示快捷键：`Ctrl+C` 安全中断，`Ctrl+R` 请求
-替换模型。按下 `Ctrl+R` 后，当前在途调用会先完成并落盘，程序在安全边界暂停，
-依次让 Human 选择“单个参与者”或“整个模型”、选择对象、选择实时发现的目标模型，
-再输入替换原因并自动恢复。非交互终端仍可使用下面的命令行形式。
+交互式运行的任务表底部会常驻显示快捷键：`Ctrl+C` 安全中断，`Ctrl+R` 立即打开
+模型与运行参数菜单，`Ctrl+P` 强制中止在途调用。菜单打开期间，已发出的模型请求
+继续运行；提交的模型和运行参数变更只用于尚未开始的调用。菜单内也可选择“强制
+中止当前在途模型调用”。已完整落盘的工作保留，未完成的
+响应不作为成果记录；批次收尾后可选替代模型并继续。远端供应商可能已经处理了部分
+请求，因此强制中止不保证免除已经发生的计费。非交互终端仍可使用下面的命令行形式。
 
 如果某个参与者的供应商不可用、持续超时或需要改用备用模型，可以在会议暂停
 或当前进程安全退出后，只替换该参与者未来的调用。会议身份、人格、已落盘的
@@ -958,7 +966,7 @@ Project_ENSEMBLE/
 ├── examples/
 ├── docs/
 │   ├── architecture/
-│   └── governance/            # v0.7.0 institutional rules
+│   └── governance/            # v0.7.1 governance baseline
 ├── src/project_ensemble/
 │   ├── audit/
 │   ├── governance_private/
