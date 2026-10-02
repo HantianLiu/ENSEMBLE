@@ -76,6 +76,26 @@ def _normalize_chapter_citation_brackets(text: str) -> str:
     return _DECORATED_CHAPTER_CITATION.sub(r"[\1]", text)
 
 
+def _normalize_chapter_citation_ids(text: str, catalog: dict) -> str:
+    """Reconcile zero-padding only with a unique ID in the frozen catalog."""
+    by_number: dict[tuple[int, int], set[str]] = {}
+    known = {source["citation_id"] for source in catalog.get("sources", [])}
+    for citation_id in known:
+        match = re.fullmatch(r"C(\d+)-(\d+)", citation_id)
+        if match:
+            by_number.setdefault((int(match[1]), int(match[2])), set()).add(citation_id)
+
+    def canonical(match: re.Match[str]) -> str:
+        citation_id = match.group(0)
+        if citation_id in known:
+            return citation_id
+        chapter, source = citation_id[1:].split("-")
+        candidates = by_number.get((int(chapter), int(source)), set())
+        return next(iter(candidates)) if len(candidates) == 1 else citation_id
+
+    return _CHAPTER_SOURCE_ID.sub(canonical, text)
+
+
 def _source_identity_key(doi: str | None, url: str) -> str:
     """Deduplicate only source identifiers strong enough to denote one work."""
 
@@ -1749,13 +1769,22 @@ class LiteratureReportExecutionRunner:
         self, module: OutlineModule, draft: ModuleDraft, catalog_path: Path,
         *, previous_draft: ModuleDraft | None = None,
     ) -> ModuleDraft:
+        if not _CHAPTER_SOURCE_MARKER.search(draft.body_markdown + "\n" + draft.short_summary):
+            return draft  # Preserve legacy packet-only drafts and their validation path.
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        normalized_body = _normalize_chapter_citation_ids(draft.body_markdown, catalog)
+        normalized_summary = _normalize_chapter_citation_ids(draft.short_summary, catalog)
+        if normalized_body != draft.body_markdown or normalized_summary != draft.short_summary:
+            draft = ModuleDraft.model_validate({
+                **draft.model_dump(mode="python"),
+                "body_markdown": normalized_body, "short_summary": normalized_summary,
+            })
         prose = draft.body_markdown + "\n" + draft.short_summary
         used = list(dict.fromkeys(
             _CHAPTER_SOURCE_MARKER.findall(_normalize_grouped_chapter_citations(prose))
         ))
         if not used:
             return draft  # Existing v0.7 drafts may use only legacy packet markers.
-        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
         by_id = {item["citation_id"]: item for item in catalog["sources"]}
         unknown = set(used) - by_id.keys()
         if unknown:

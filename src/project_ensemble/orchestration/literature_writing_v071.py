@@ -24,6 +24,7 @@ from project_ensemble.orchestration.consultations import (
 from project_ensemble.orchestration.literature_report_execution import (
     ModuleDraft, WholeReportSynthesis, _CHAPTER_SOURCE_MARKER, _PACKET_MARKER,
     _effective_chapter_citation_catalog_path, _source_identity_key,
+    _normalize_chapter_citation_ids,
 )
 from project_ensemble.runtime.model_lanes import run_bounded_representative_lanes
 from project_ensemble.orchestration.readability_policy import reader_style_policy
@@ -242,6 +243,30 @@ def _mechanically_repair_writer_citations(
             packet_sources.setdefault(packet_id, set()).add(source["citation_id"])
     body = chapter.draft.body_markdown
     operations: list[dict[str, str]] = []
+
+    def normalize_ids(text: str, field: str) -> str:
+        normalized = _normalize_chapter_citation_ids(text, catalog)
+        if normalized != text:
+            for citation_id in dict.fromkeys(re.findall(r"\bC\d+-\d+\b", text)):
+                canonical = _normalize_chapter_citation_ids(citation_id, catalog)
+                if canonical != citation_id:
+                    operations.append({"operation": "CANONICALIZE_CITATION_ZERO_PADDING",
+                                       "field": field, "original": citation_id,
+                                       "replacement": canonical})
+        return normalized
+
+    body = normalize_ids(body, "draft.body_markdown")
+    summary = normalize_ids(chapter.draft.short_summary, "draft.short_summary")
+    glossary = [term.model_copy(update={
+        "explanation": normalize_ids(term.explanation, f"glossary.{index}.explanation"),
+        "formula": (normalize_ids(term.formula, f"glossary.{index}.formula") if term.formula else term.formula),
+        "source_citation_ids": [normalize_ids(cid, f"glossary.{index}.source_citation_ids")
+                                for cid in term.source_citation_ids],
+    }) for index, term in enumerate(chapter.glossary_additions)]
+    deviations = [item.model_copy(update={
+        "new_evidence_citation_ids": [normalize_ids(cid, f"outline_deviations.{index}.new_evidence_citation_ids")
+                                      for cid in item.new_evidence_citation_ids],
+    }) for index, item in enumerate(chapter.outline_deviations)]
     if _CHAPTER_SOURCE_MARKER.search(body + "\n" + chapter.draft.short_summary):
         retained = []
         for line in body.splitlines(keepends=True):
@@ -263,14 +288,15 @@ def _mechanically_repair_writer_citations(
         return f"[{citation_id}]"
 
     body = _PACKET_MARKER.sub(replace_packet, body)
-    summary = _PACKET_MARKER.sub(replace_packet, chapter.draft.short_summary)
+    summary = _PACKET_MARKER.sub(replace_packet, summary)
     if not operations:
         return chapter, []
     draft = ModuleDraft.model_validate({
         **chapter.draft.model_dump(mode="python"),
         "body_markdown": body, "short_summary": summary,
     })
-    return chapter.model_copy(update={"draft": draft}), operations
+    return chapter.model_copy(update={"draft": draft, "glossary_additions": glossary,
+                                      "outline_deviations": deviations}), operations
 
 
 def _recheck_writer_citation_evidence(
@@ -873,6 +899,13 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
                     dispositions: Path | None = None,
                     review_path: Path | None = None) -> tuple[Path, WriterChapter]:
     base = _module_base(module) / "writing_v071"
+    validated = runner.repo.root / base / f"writer_v{version}_validated.json"
+    if validated.is_file():
+        # Resume a scientific review with its exact frozen draft, rather than
+        # reselecting an earlier response under newer presentation rules.
+        chapter = WriterChapter.model_validate_json(validated.read_text(encoding="utf-8"))
+        draft_path = _freeze(runner, _module_base(module) / "drafts" / f"v071-v{version}.json", chapter.draft)
+        return draft_path, chapter
     runner._ensure_chapter_citation_catalog(module, dossier_path)
     catalog_path = _effective_chapter_citation_catalog_path(
         runner.repo.root, module.module_id, before_writer_version=version,
@@ -1041,7 +1074,7 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
     source_chapter = chapter
     chapter, mechanical_operations = _mechanically_repair_writer_citations(chapter, catalog)
     if mechanical_operations:
-        _freeze(runner, base / f"writer_v{version}_citation_mechanical.json", {
+        _freeze(runner, base / f"writer_v{version}_citation_mechanical_v2.json", {
             "source_sha256": hashlib.sha256(source_chapter.model_dump_json().encode()).hexdigest(),
             "operations": mechanical_operations,
             "result": chapter.model_dump(mode="json"),
@@ -1049,11 +1082,11 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
         })
     problems = citation_issues(chapter)
     for attempt in range(1, 4):
-        if not problems:
-            break
-        prior = chapter
         relative = (base / f"writer_v{version}_citation_repair.json" if attempt == 1 else
                     base / f"writer_v{version}_citation_repair_{attempt:02d}.json")
+        if not problems and not (runner.repo.root / relative).is_file():
+            break
+        prior = chapter
         chapter = _frozen_or_call(
             runner, relative, WriterChapter,
             "WRITER", f"literature_v071_writer_{module.module_id}_v{version}_citation_repair_{attempt}",
@@ -1068,7 +1101,7 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
         )
         chapter, operations = _mechanically_repair_writer_citations(chapter, catalog)
         if operations:
-            _freeze(runner, base / f"writer_v{version}_citation_repair_{attempt:02d}_mechanical.json", {
+            _freeze(runner, base / f"writer_v{version}_citation_repair_{attempt:02d}_mechanical_v2.json", {
                 "operations": operations, "result": chapter.model_dump(mode="json"),
                 "policy": "PRESENTATION_ONLY; FROZEN_MODEL_RESPONSE_UNCHANGED",
             })
