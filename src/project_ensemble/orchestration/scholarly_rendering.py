@@ -29,6 +29,9 @@ from project_ensemble.orchestration.consultations import (
 )
 from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.orchestration.academic_html import render_academic_review_html
+from project_ensemble.orchestration.math_integrity import (
+    FORMULA_BOOKKEEPING_RULES, audit_math_round, formula_bookkeeping_rules_for,
+)
 from project_ensemble.orchestration.readability_policy import (
     reader_facing_prose_contract, reader_style_policy,
 )
@@ -47,6 +50,7 @@ from project_ensemble.research.desk import ResearchDesk
 from project_ensemble.research.models import EvidencePacket, ResearchRequest, ResearchStage
 from project_ensemble.runtime.model_lanes import run_bounded_representative_lanes
 from project_ensemble.runtime.structured_output import parse_json_object
+from project_ensemble.runtime.evidence_read_loop import invoke_with_evidence_reads
 from project_ensemble.runtime.model_replacements import (
     current_runtime_for,
     replacement_model_pairs,
@@ -3278,6 +3282,8 @@ class ScholarlyRenderingRunner:
         system: str,
         user: dict,
     ) -> BaseModel:
+        if schema.__name__ == "ScienceReview":
+            system += formula_bookkeeping_rules_for(self.repo)
         if schema.__name__ in {"RenderedSection", "ChairScienceRevision"}:
             rendering = getattr(self, "manifest", {})
             system += reader_facing_prose_contract({
@@ -3290,23 +3296,30 @@ class ScholarlyRenderingRunner:
             + "\n\n只返回一个符合以下结构的 JSON 对象：\n"
             + json.dumps(schema.model_json_schema(), ensure_ascii=False)
         )
-        response = self.engine.find_recorded_response(
-            participant_id, system_text=system, user_text=user_text, stage=stage
-        ) or self.engine.invoke_participant(
-            participant_id,
-            system_text=system,
-            user_text=user_text,
-            stage=stage,
-            max_output_tokens=self.max_output_tokens,
+        read_turn = invoke_with_evidence_reads(
+            self, participant_id, stage=stage, schema=schema, system=system, user_text=user_text,
         )
-        return self.engine.validate_structured_response(
+        validation_stage = stage
+        if read_turn is not None:
+            response, system, user_text, validation_stage = read_turn
+        else:
+            response = self.engine.find_recorded_response(
+                participant_id, system_text=system, user_text=user_text, stage=stage
+            ) or self.engine.invoke_participant(
+                participant_id, system_text=system, user_text=user_text, stage=stage,
+                max_output_tokens=self.max_output_tokens,
+            )
+        value = self.engine.validate_structured_response(
             participant_id,
             response=response,
             schema_model=schema,
-            stage=stage,
+            stage=validation_stage,
             max_output_tokens=self.max_output_tokens,
             semantic_requirement="保留冻结的实质内容，只执行当前重绘或审阅动作。",
+            **({"original_system_text": system, "original_user_text": user_text}
+               if read_turn is not None else {}),
         )
+        return audit_math_round(self, participant_id, stage, value)
 
     def _restore_pre_limit_chair_advice(
         self, *, stage: str, system: str, user: dict,

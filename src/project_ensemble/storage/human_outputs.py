@@ -62,7 +62,7 @@ def ensure_visible_link(
         raise ValueError("visible output link_name must be one root-level filename")
     target_relative = Path(target_relative)
     target = (root / target_relative).resolve()
-    if not target.is_relative_to(root) or not target.is_file():
+    if not target.is_relative_to(root) or not (target.is_file() or target.is_dir()):
         raise ValueError(f"visible output target is missing or escapes the meeting: {target_relative}")
     link = root / link_name
     expected = os.path.relpath(target, start=link.parent)

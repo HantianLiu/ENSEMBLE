@@ -20,16 +20,18 @@ from project_ensemble.orchestration.report_palette import DEFAULT_PALETTE, PALET
 
 
 _MATHJAX = "https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js"
-HTML_RENDERING_PROFILE = "ACADEMIC_HTML_MATHJAX_ANNOTATIONS_NOTES_V19"
+HTML_RENDERING_PROFILE = "ACADEMIC_HTML_MATHJAX_ANNOTATIONS_NOTES_V29"
 _INLINE_MATH = re.compile(r"(?<![\\$])\$(?!\$)([^\n$]+?)(?<!\\)\$(?!\$)|\\\((.+?)\\\)")
 _STRONG_CJK_BOUNDARY = re.compile(r"(?<=[。！？；：，、.!?;:])\*\*(?=[\u3400-\u9fffA-Za-z])")
 _CODE_SPAN = re.compile(r"(`+[^`\n]*`+)")
 _CITATION = re.compile(r"\[(\d+(?:\s*[,，;；–-]\s*\d+)*)\]")
 _GLOSSARY_ITEM = re.compile(r"^\s*-\s+\*\*(.+?)\*\*\s*[:：]\s*(.+)$")
 _REFERENCE_ITEM = re.compile(r"^\s*\[(\d+)\]\s+(.+)$")
+_NUMBERED_CITATION = r"\[[0-9]+(?:\s*[,，]\s*[0-9]+)*\]"
+_NUMBERED_CITATION_RUN = rf"(?:{_NUMBERED_CITATION}\s*[；;,，、]\s*)*{_NUMBERED_CITATION}"
 _PARENTHESIZED_CITATION_RUN = re.compile(
-    r"[（(]\s*((?:\[\d+(?:\s*[,，]\s*\d+)*\]\s*[；;]\s*)+"
-    r"\[\d+(?:\s*[,，]\s*\d+)*\])\s*[）)]"
+    rf"(?<!\])(?:（\s*(?P<wide>{_NUMBERED_CITATION_RUN})\s*）"
+    rf"|\(\s*(?P<ascii>{_NUMBERED_CITATION_RUN})\s*\))"
 )
 _READER_NOTE_DEFINITION = re.compile(r"^\[\^(note-[A-Za-z0-9_-]+)\]:\s*(.+?)\s*$")
 _READER_NOTE_CALLOUT = re.compile(
@@ -132,9 +134,10 @@ def _number_reader_sections(markdown: str) -> str:
 
 
 def normalize_reader_citation_groups(text: str) -> str:
-    """Turn citation-only parenthetical runs into one ordinary numbered cite."""
+    """Remove redundant outer parentheses from citation-only groups."""
     def replace(match: re.Match[str]) -> str:
-        numbers = [number for citation in re.findall(r"\[([^]]+)\]", match.group(1))
+        citations = match.group("wide") or match.group("ascii")
+        numbers = [number for citation in re.findall(r"\[([^]]+)\]", citations)
                    for number in re.findall(r"\d+", citation)]
         return "[" + ", ".join(dict.fromkeys(numbers)) + "]"
 
@@ -273,6 +276,7 @@ def render_academic_review_html(
     markdown: str, *, meeting_id: str, language: str | None = None,
     palette: str = DEFAULT_PALETTE,
     reference_links: dict[str, dict[str, str]] | None = None,
+    figure_assets: dict[str, bytes] | None = None,
 ) -> str:
     """Build a navigable report; MathJax typesets TeX in the browser."""
     if palette not in PALETTES:
@@ -339,6 +343,29 @@ def render_academic_review_html(
         return "".join(fragments)
 
     parser.add_render_rule("text", reader_text)
+    original_image_rule = parser.renderer.rules["image"]
+    def generated_image(_renderer, tokens, index, _options, _env):
+        import base64
+        token = tokens[index]
+        source = token.attrGet("src") or ""
+        if source.startswith("figures/generated-"):
+            data = (figure_assets or {}).get(source)
+            alt_text = token.content
+            for key, rendered in replacements.items():
+                if key in alt_text:
+                    expression = re.search(r'data-tex="([^"]*)"', rendered)
+                    if expression:
+                        alt_text = alt_text.replace(key, r"\(" + html.unescape(expression[1]) + r"\)")
+            for key in note_replacements:
+                alt_text = alt_text.replace(key, "[注]")
+            alt = html.escape(alt_text, quote=True)
+            if data is None:
+                return f'<span class="figure-fallback">{alt}</span>'
+            encoded = base64.b64encode(data).decode("ascii")
+            return (f'<img class="ensemble-figure" src="data:image/png;base64,{encoded}" '
+                    f'alt="{alt}" style="display:block;max-width:100%;height:auto;margin:1em auto" loading="lazy">')
+        return original_image_rule(tokens, index, _options, _env)
+    parser.add_render_rule("image", generated_image)
     tokens = parser.parse(protected)
     toc: list[tuple[int, str, str]] = []
     heading_count = 0
@@ -405,11 +432,15 @@ def render_academic_review_html(
     assets = Path(__file__).resolve().parents[1] / "assets"
     annotation_css = (assets / "reader_annotations.css").read_text(encoding="utf-8")
     annotation_js = (assets / "reader_annotations.js").read_text(encoding="utf-8")
+    markdown_js = (assets / "reader_markdown.js").read_text(encoding="utf-8")
+    navigation_js = (assets / "reader_navigation.js").read_text(encoding="utf-8")
+    focus_js = (assets / "reader_focus.js").read_text(encoding="utf-8")
     qa_data = json.dumps({"title": title, "markdown": markdown}, ensure_ascii=False)
     qa_data = qa_data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     qa_document = (assets / "reader_qa.html").read_text(encoding="utf-8").replace(
         "ENSEMBLE_QA_REPORT_DATA", qa_data,
     )
+    qa_document = qa_document.replace("<!-- ENSEMBLE_READER_MARKDOWN -->", "<script>" + markdown_js + "</script>")
     qa_srcdoc = html.escape(qa_document, quote=True)
     annotation_key = "ensemble-reader:" + hashlib.sha256(
         (meeting_id + "\n" + markdown).encode("utf-8")
@@ -418,19 +449,19 @@ def render_academic_review_html(
         "zh" if re.search(r"[\u3400-\u9fff]", markdown) else "en"
     )
     return f'''<!doctype html>
-<html lang="{document_language}" data-annotation-key="{annotation_key}">
+<html lang="{document_language}" data-annotation-key="{annotation_key}" data-meeting-id="{html.escape(meeting_id, quote=True)}">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
-:root {{ color-scheme: light; --ink:{colors['ink']}; --muted:{colors['mid']}; --line:{colors['line']}; --paper:{colors['paper']}; --accent:{colors['accent']}; --pale:{colors['pale']}; }}
-* {{ box-sizing:border-box; }} body {{ margin:0; background:var(--pale); color:var(--ink); font:16px/1.8 system-ui,"Noto Sans CJK SC",sans-serif; }}
-.shell {{ max-width:1320px; margin:auto; display:grid; grid-template-columns:250px minmax(0,1fr); gap:28px; padding:28px; }}
+:root {{ color-scheme: light; --ink:{colors['ink']}; --muted:{colors['mid']}; --line:{colors['line']}; --paper:#fff; --accent:{colors['accent']}; --pale:{colors['pale']}; --reader-shell-max:1320px; --reader-shell-padding:28px; --reader-nav-column:250px; --reader-shell-gap:28px; }}
+* {{ box-sizing:border-box; }} body {{ margin:0; background:#fff; color:var(--ink); font:16px/1.8 system-ui,"Noto Sans CJK SC",sans-serif; }}
+.shell {{ max-width:var(--reader-shell-max); margin:auto; display:grid; grid-template-columns:var(--reader-nav-column) minmax(0,1fr); gap:var(--reader-shell-gap); padding:var(--reader-shell-padding); }}
 nav {{ position:sticky; top:20px; align-self:start; max-height:calc(100vh - 40px); min-height:0; display:flex; flex-direction:column; overflow:hidden; font-size:.88rem; }}
 nav .toc-scroll {{ min-height:0; overflow:auto; flex:1; }}
 nav ul {{ padding:0; list-style:none; }} nav li {{ margin:.25em 0; }} nav .level-3 {{ padding-left:1em; }}
 nav a {{ color:var(--muted); text-decoration:none; }} nav a:hover {{ color:var(--accent); text-decoration:underline; }}
-main {{ min-width:0; background:var(--paper); padding:clamp(24px,5vw,76px); box-shadow:0 3px 28px #26364514; }}
+main {{ min-width:0; background:var(--paper); padding:clamp(24px,5vw,76px); border-radius:4px; box-shadow:0 6px 26px #0000001a,0 1px 6px #0000000d; }}
 article {{ max-width:82ch; margin:auto; }} h1,h2,h3,h4,h5,h6 {{ line-height:1.35; break-after:avoid; scroll-margin-top:24px; }}
 h1 {{ font-size:2.15rem; }} h2 {{ margin-top:2.5em; padding-top:.8em; border-top:1px solid var(--line); font-size:1.7rem; }}
 h3 {{ margin-top:2em; font-size:1.45rem; }} h4 {{ margin-top:1.8em; font-size:1.3rem; }}
@@ -458,20 +489,29 @@ pre {{ overflow-x:auto; padding:1em; background:#f3f6f8; }} .math.display {{ ove
 .citation-reference p {{ margin:.5em 0; }}
 .citation-source-links {{ display:flex; flex-wrap:wrap; gap:.7em; font-size:.9rem; }}
 .citation-source-links a {{ color:var(--accent); }}
-@media(max-width:800px) {{ .shell {{ display:block; padding:0; }} nav {{ position:static; display:block; max-height:none; padding:1em; }} nav .toc-scroll {{ max-height:35vh; }} main {{ box-shadow:none; padding-bottom:11em; }} }}
-@media print {{ body {{ background:white; }} .shell {{ display:block; padding:0; }} nav {{ display:none; }} main {{ box-shadow:none; padding:0; }} h2 {{ break-before:page; }} a {{ color:inherit; }} }}
+@media(max-width:800px) {{ .shell {{ display:block; padding:0; }} nav {{ position:static; display:block; max-height:none; padding:1em; }} nav .toc-scroll {{ max-height:35vh; }} main {{ margin:12px 8px; padding-bottom:11em; }} }}
+@media print {{ body {{ background:white; }} .shell {{ display:block; padding:0; }} nav {{ display:none; }} main {{ box-shadow:none; border-radius:0; margin:0; padding:0; }} h2 {{ break-before:page; }} a {{ color:inherit; }} }}
 {annotation_css}
 </style>
 <script>window.MathJax = {mathjax_config};</script>
 <script defer src="{html.escape(mathjax_url, quote=True)}"></script>
 </head>
-<body><div class="shell"><nav aria-label="目录"><div class="toc-scroll"><strong>目录</strong><ul>{navigation}</ul></div><details class="annotation-tools" id="annotation-tools"><summary>我的高亮、批注与问答</summary><div class="annotation-list" id="annotation-list"></div><button type="button" id="annotation-collapse">收起列表</button><button type="button" id="annotation-save-html">保存带批注和问答的 HTML</button><span class="annotation-status" id="annotation-status" role="status" aria-live="polite"></span></details></nav>
+<body><div class="shell"><nav aria-label="目录">
+<div class="reader-nav-tabs" role="tablist" aria-label="阅读导航"><button type="button" id="nav-toc" role="tab" aria-controls="toc-panel" aria-selected="true">目录</button><button type="button" id="nav-annotations" role="tab" aria-controls="annotation-tools" aria-selected="false" tabindex="-1">批注与问答</button></div>
+<div class="reader-appearance" role="group" aria-label="阅读外观"><button type="button" id="reader-focus-toggle" aria-pressed="false" title="指向标注或批注临时聚焦；单击锁定，Esc 解除">聚焦模式：关</button><label for="reader-palette">配色</label><select id="reader-palette"><option value="white">原有白色</option><option value="butter">浅黄 · 奶油纸</option></select><span id="reader-focus-status" role="status" aria-live="polite"></span></div>
+<div class="reader-search"><label for="reader-search">搜索正文</label><input id="reader-search" type="search" placeholder="搜索文字…"><div><button type="button" id="search-prev" aria-label="上一个结果">↑</button><button type="button" id="search-next" aria-label="下一个结果">↓</button><button type="button" id="search-clear">清除</button><span id="reader-search-status" role="status" aria-live="polite"></span></div></div>
+<div class="toc-scroll" id="toc-panel" role="tabpanel" aria-labelledby="nav-toc"><ul>{navigation}</ul></div><section class="annotation-tools" id="annotation-tools" role="tabpanel" aria-labelledby="nav-annotations" hidden><div class="annotation-list" id="annotation-list"></div><button type="button" id="annotation-collapse">返回目录</button><button type="button" id="annotation-save-html">保存带批注和问答的 HTML</button><button type="button" id="annotation-export-data">导出批注数据</button><button type="button" id="annotation-import-data">导入数据／旧副本</button><input type="file" id="annotation-import-file" accept=".json,.html,application/json,text/html" hidden><span class="annotation-import-status" id="annotation-import-status" role="status" aria-live="polite"></span><button type="button" id="qa-open-general">问 AI</button></section><span class="annotation-status" id="annotation-status" role="status" aria-live="polite"></span></nav>
 <main><article>{body}</article><p class="meta">Project ENSEMBLE · {html.escape(meeting_id)}</p></main></div>
 <script type="application/json" id="embedded-annotations">[]</script>
-<div id="selection-menu" class="selection-menu" role="toolbar" aria-label="选中文字操作" hidden><button type="button" id="annotation-highlight">高亮</button><button type="button" id="annotation-create">批注</button><button type="button" id="qa-open">问 AI</button></div>
+<script type="application/json" id="embedded-qa-history">[]</script>
+<div id="annotation-floats" aria-label="已保存的批注"></div>
+<div id="reader-position-rail" aria-label="文档位置与搜索结果"><div id="reader-position-viewport"></div><div id="reader-position-ticks"></div></div>
+<div id="reader-star-rail" role="group" aria-label="重要批注位置"></div>
+<div id="selection-menu" class="selection-menu" role="toolbar" aria-label="选中文字操作" hidden><button type="button" id="annotation-highlight" title="Alt+Shift+H">高亮</button><button type="button" id="annotation-create" title="Alt+Shift+N">批注</button><button type="button" id="qa-open" title="Alt+Shift+A">问 AI</button><button type="button" id="selection-copy">复制</button></div>
 <aside class="drawer" id="reader-drawer" aria-label="术语与引文详情" hidden><div class="drawer-controls"><button type="button" id="drawer-back" aria-label="返回上一条详情" hidden>← 返回</button><button type="button" id="drawer-close" aria-label="关闭所有侧栏">关闭 ×</button></div><h2 id="drawer-title"></h2><div class="drawer-body" id="drawer-body"></div></aside>
-<aside class="annotation-panel" id="annotation-panel" aria-label="编辑读者批注" hidden><div class="annotation-panel-header"><h2>编辑批注</h2><button type="button" id="annotation-close">收起 ×</button></div><div class="annotation-detail" id="annotation-detail" hidden><blockquote id="annotation-quote"></blockquote><label for="annotation-note">批注（可使用 $...$ 或 $$...$$ 写公式）</label><textarea id="annotation-note" maxlength="4000"></textarea><div class="annotation-preview" id="annotation-preview" aria-label="批注公式预览"></div><div class="annotation-detail-actions"><button type="button" id="annotation-save">保存批注</button><button type="button" id="annotation-ask-ai">就这条高亮问 AI</button><button type="button" id="annotation-delete">删除标注</button></div></div></aside>
+<aside class="annotation-panel" id="annotation-panel" aria-label="读者批注" hidden><div class="annotation-panel-header"><h2 id="annotation-title">批注</h2><button type="button" id="annotation-close">收起 ×</button></div><div class="annotation-detail" id="annotation-detail" hidden><blockquote id="annotation-quote" hidden></blockquote><div id="annotation-editor" hidden><label for="annotation-note">批注（可使用 $...$ 或 $$...$$ 写公式）</label><textarea id="annotation-note" maxlength="4000"></textarea></div><p class="annotation-empty-message" id="annotation-empty-message" hidden>尚无批注；输入内容后保存。</p><div class="annotation-preview" id="annotation-preview" aria-label="渲染后的批注" title="双击编辑批注" tabindex="0"></div><div class="annotation-detail-actions"><button type="button" id="annotation-save" hidden>保存批注</button><button type="button" id="annotation-edit">编辑</button><button type="button" id="annotation-cancel" hidden>取消编辑</button><button type="button" id="annotation-star" class="annotation-star-toggle" aria-label="加星，标为重要批注" aria-pressed="false" title="加星，标为重要批注" hidden>☆</button><button type="button" id="annotation-ask-ai">就这条高亮问 AI</button><button type="button" id="annotation-delete">删除标注</button></div></div></aside>
 <aside class="qa-panel" id="qa-panel" aria-label="报告快速问答" hidden><button type="button" id="qa-close" aria-label="收起问答，保留本页密钥">收起问答 ×</button><iframe id="qa-frame" title="报告快速问答 · DeepSeek" sandbox="allow-scripts" referrerpolicy="no-referrer" data-srcdoc="{qa_srcdoc}"></iframe></aside>
+<aside class="reader-entry-panel" id="reader-entry-panel" aria-label="批注与问答全文" hidden><div class="annotation-panel-header"><h2 id="reader-entry-title">完整内容</h2><button type="button" id="reader-entry-star" class="annotation-star-toggle" aria-label="加星，标为重要批注" aria-pressed="false" title="加星，标为重要批注" hidden>☆</button><button type="button" id="reader-entry-close">收起 ×</button></div><div class="annotation-preview" id="reader-entry-body"></div><button type="button" id="reader-entry-continue" hidden>继续问 AI</button></aside>
 <script type="application/json" id="reader-cards">{cards}</script>
 <script>
 const cards = JSON.parse(document.getElementById('reader-cards').textContent);
@@ -566,6 +606,7 @@ function renderReaderCard() {{
     drawerBody.appendChild(paragraph);
   }}
   drawerBack.hidden = readerStack.length < 2;
+  document.dispatchEvent(new Event('ensemble-reader-card-open'));
   drawer.hidden = false;
   if (window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([drawer]);
 }}
@@ -589,4 +630,4 @@ document.addEventListener('click', event => {{
 drawerBack.addEventListener('click', () => {{ readerStack.pop(); renderReaderCard(); }});
 document.getElementById('drawer-close').addEventListener('click', closeReaderCards);
 document.addEventListener('keydown', event => {{ if (event.key === 'Escape') closeReaderCards(); }});
-</script><script>{annotation_js}</script></body></html>'''
+</script><script>{markdown_js}</script><script>{navigation_js}</script><script>{annotation_js}</script><script>{focus_js}</script></body></html>'''

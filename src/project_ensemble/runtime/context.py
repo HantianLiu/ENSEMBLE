@@ -10,6 +10,7 @@ from typing import Any
 
 from project_ensemble.errors import AccessDeniedError
 from project_ensemble.storage.events import HashChainEventLog
+from project_ensemble.runtime.prompt_contract import prompt_contract_version
 
 
 @dataclass(frozen=True)
@@ -150,12 +151,22 @@ class RepresentativeContextAssembler:
         )
 
     def assemble(self, spec: RepresentativeContextSpec) -> str:
+        common_text = self._read(spec, spec.common_rules, "COMMON_RULES")
         chinese = (
             spec.governance_root is not None
             and spec.governance_root.name == "governance"
         )
+        new_contract = prompt_contract_version(spec.meeting_root) >= 2
+        if new_contract:
+            # Neutral labels are independent of where frozen governance lives.
+            manifest = json.loads((spec.meeting_root / "identity_private/meeting_manifest.json").read_text(
+                encoding="utf-8"))
+            language = manifest.get("deliberation_language") or manifest.get("rendering_language")
+            chinese = (language == "zh" or (
+                language not in {"en", "fr"} and bool(re.search(
+                    r"[\u4e00-\u9fff]", common_text))))
         sections = [
-            ("共同规则" if chinese else "COMMON RULES", self._read(spec, spec.common_rules, "COMMON_RULES")),
+            ("共同规则" if chinese else "COMMON RULES", common_text),
             ("当前阶段" if chinese else "CURRENT STAGE", self._read(spec, spec.current_stage_protocol, "CURRENT_STAGE_PROTOCOL")),
         ]
         public_bodies: list[str] = []
@@ -179,10 +190,12 @@ class RepresentativeContextAssembler:
         # Keep meeting-wide material as one stable prefix. Provider prompt caches are
         # prefix-based, so participant-specific persona and private state belong after it.
         sections.append(
-            ("本次职能侧重" if chinese else "YOUR PERSONA", self._read(spec, spec.persona_runtime, "PERSONA_RUNTIME"))
+            ("本次职能侧重" if chinese else ("TASK EMPHASIS" if new_contract else "YOUR PERSONA"),
+             self._read(spec, spec.persona_runtime, "PERSONA_RUNTIME"))
         )
         for p in spec.own_state_files:
-            sections.append((f"{'本人记录' if chinese else 'YOUR STATE'}: {p.name}", self._read(spec, p, "OWN_STATE")))
+            sections.append((f"{'本人记录' if chinese else ('OWN RECORD' if new_contract else 'YOUR STATE')}: {p.name}",
+                             self._read(spec, p, "OWN_STATE")))
         return "\n\n".join(f"## {title}\n{body.strip()}" for title, body in sections) + "\n"
 
     def _bounded_research_evidence(

@@ -2,7 +2,7 @@
 
 **当前版本 / Current version:** [中文说明](README_v071.md) · [English guide](README_v071.en.md)
 
-Project ENSEMBLE 是一个多模型研究与审议工作台。当前 `v0.7.3` 是供反馈的早期
+Project ENSEMBLE 是一个多模型研究与审议工作台。当前 `v0.7.5` 是供反馈的早期
 预览版：它支持文献调研的简易与完整流程、单项命题核实、议事会议和学术重绘。
 议事会议让不同模型对规则、标准或提示词委托逐条提案、质疑和表决，交付可审计的
 规范性文本；它不负责执行该委托，也不默认撰写文献综述。
@@ -11,7 +11,7 @@ Project ENSEMBLE 是一个多模型研究与审议工作台。当前 `v0.7.3` �
 下面较长的英文内容主要记录旧版背景和设计沿革。
 
 Project ENSEMBLE is a multi-model research and deliberation workbench. Version
-`0.7.3` is an early feedback preview, not an unattended research service.
+`0.7.5` is an early feedback preview, not an unattended research service.
 Deliberation has independent models propose, challenge, and vote on clauses for
 rules or prompt briefs. Its output is an auditable normative document, not
 execution of the brief or a literature review. The Audit meeting runner is not
@@ -21,7 +21,7 @@ code is [MIT-licensed](LICENSE); the bundled font has a
 [separate license](THIRD_PARTY_NOTICES.md). Start with the current-version guide
 linked above; the longer English material below also retains legacy design context.
 
-Version **0.7.3**. For the version-specific quick start and current trial limits,
+Version **0.7.5**. For the version-specific quick start and current trial limits,
 read [`README_v071.md`](README_v071.md). This sibling distribution installs the
 canonical `ensemble` command; the previous v0.7.0 runtime is now invoked as
 `ensemble-old`. `ensemble-v071` remains a compatibility alias whose name reflects
@@ -56,7 +56,7 @@ flow and should be resumed with `ensemble-old`. The remainder of this README
 documents the inherited v0.7.0 interface and legacy workflows; historical
 `ensemble-v07 ...` examples below refer to that compatibility alias, whose
 canonical name is now `ensemble-old ...`. In this checkout, bare `ensemble`
-always starts v0.7.3.
+always starts v0.7.5.
 
 The inherited v0.7.0 distribution used to install `ensemble`; that runtime is
 now exposed as `ensemble-old`, with `ensemble-v07` retained as a compatible
@@ -185,7 +185,7 @@ Cost is optimized only inside an acceptable epistemic and procedural envelope. W
 Several adopted next-version rules are not yet executable and code must not pretend
 otherwise. See `TODO.md`. Important boundaries include dynamic pivotal-missing-ballot
 handling, two-level per-item malformed-output recovery, backup-Chair transfer, and the
-full Audit/Correction state machines. The current v0.7.3 release hides Audit
+full Audit/Correction state machines. The current v0.7.5 release hides Audit
 meeting creation and the `run-audit` command; existing Audit records remain
 unchanged until a future runner is available. Earlier versions exposed a
 non-mutating fail-fast interface.
@@ -273,7 +273,7 @@ missing that dependency can still search evidence-packet metadata but must not
 claim to have read PDF full text.
 New IDs use `AU-` for Audit, `LR-` for literature-review or research-only meetings,
 `DL-` for normative deliberation, and `SR-` for scholarly rendering. `VR-` is reserved
-for a future one-shot verification meeting type; v0.7.3 does not yet run that procedure.
+for a future one-shot verification meeting type; v0.7.5 does not yet run that procedure.
 Existing `M-` meetings retain their IDs and remain discoverable and resumable. The
 explicit `ensemble-v07 start` command remains available, as do
 `run-general`, `run-report`, `run-render`, and `run-research`; existing automation and old resume
@@ -310,7 +310,7 @@ is refreshed at the next interruption.
 
 ### Importing an unfinished v0.6 meeting into this release
 
-The v0.7.3 runner does not write into a v0.6 meeting. Stop the old process and
+The v0.7.5 runner does not write into a v0.6 meeting. Stop the old process and
 import a verified copy into a **new** path:
 
 ```bash
@@ -326,7 +326,7 @@ ensemble migrate-v06 \
 ensemble open /absolute/path/to/M-OLDID-v073
 ```
 
-Use a separate v0.7.3 configuration file; the importer refuses the path frozen
+Use a separate v0.7.5 configuration file; the importer refuses the path frozen
 as the old meeting's v0.6 configuration. The import checks the legacy event hash
 chain, a stopped meeting run lock, manifest consistency, configured providers,
 every source file, and local symlinks.
@@ -336,9 +336,9 @@ migration provenance in the copy. The original directory remains available for
 v0.6 rollback. The copied meeting keeps its meeting ID, so open it by **path**;
 the installation-local ID index can point to only one copy at a time. Rules for
 future, unfinished steps follow the v0.7.1 governance baseline; already frozen decisions are not
-re-voted. Audit meetings cannot be imported because v0.7.3 has no Audit runner.
+re-voted. Audit meetings cannot be imported because v0.7.5 has no Audit runner.
 The import makes no model calls and never resumes automatically. If a resumed
-legacy artifact requires a procedure that v0.7.3 cannot interpret, execution
+legacy artifact requires a procedure that v0.7.5 cannot interpret, execution
 pauses and the original v0.6 meeting remains intact.
 
 `ensemble-old start` performs live model discovery and creates the durable,
@@ -362,10 +362,69 @@ own single-model settings.
 
 If Research Desk is enabled, its selected model and reasoning setting remain
 identity-private and do not add a meeting participant. Its trial retrieval stack
-uses OpenAlex as the primary scholarly index and optionally Tavily as the general-Web
-supplement. The configured freshness window is 7, 30, or 180 days from packet
+uses OpenAlex as the scholarly index and a meeting-selected general search engine:
+Tavily, Parallel, or disabled (the default for new meetings). Configure credentials
+under Settings → Search, then choose the engines during initialization.
+
+Search settings first list OpenAlex, Tavily and Parallel with credential status,
+then let you test or edit only the selected backend. Blank values retain settings;
+replacements require confirmation and new keys use separate private files.
+API tests never rewrite credentials: OpenAlex uses `/rate-limit`, Tavily uses
+`/usage`, and Parallel's fast/one-result test needs separate paid-call consent.
+Initialization offers the same API-settings entry alongside Tavily / disabled /
+Parallel; returning from settings still requires a meeting-local engine choice.
+
+Institutional original reading is a separate, explicit meeting permission,
+not an OpenAlex API key or an assertion of open access. Choose academic option 2
+at initialization, `--institutional-access` for non-interactive startup, or Ctrl+R
+→ setting 10 for an existing meeting. Publisher requests originate from the
+execution node using its existing access; no proxy/login setup or authentication
+bypass is attempted. Each original gets at most four direct requests; downloaded
+files and failed attempts are reused across questions and resumes. Abstract-only
+landing pages are not full-text evidence. Subscription originals stay under
+`human_private/institutional_documents/`, survive compaction, and are excluded
+from public literature ZIPs and `ensemble gather`. Obtaining an original never
+automatically resolves scientific objections; previously frozen work is unchanged.
+
+Parallel
+uses the official v1 Search API, explicitly sends `mode="fast"` (or `"turbo"`),
+and caps results server-side at 10 through `advanced_settings.max_results`.
+Only fast/turbo and result limits 1–10 are accepted, avoiding implicit Advanced
+and extra-result charges ([Parallel API](https://docs.parallel.ai/api-reference/search/search)).
+Selecting Parallel never instantiates Tavily or reads its key; paid Parallel Extract
+is not used. Neither provider's search excerpts count as verified original text. Tavily Search explicitly sends `auto_parameters=false` and defaults
+to `search_depth="basic"`; Advanced search is opt-in through
+`research.tavily.search_depth`. Request traces record the selected depth and
+provider-reported credit usage. Basic Search costs 1 credit per API request,
+versus 2 for Advanced ([Tavily pricing](https://docs.tavily.com/documentation/api-credits)).
+A claim check issues four adversarial searches, so a complete Tavily pass uses
+4 Basic Search credits before retries and separately billed source extraction.
+Paid Tavily Extract is explicit opt-in through `research.tavily.extract_enabled=true`;
+by default web originals are fetched and parsed directly. Its opt-in extraction depth
+remains Advanced. Four-way evidence checks are unchanged; using a cheaper engine
+does not establish evidence quality or a scientific conclusion.
+The configured freshness window is 7, 30, or 180 days from packet
 retrieval time for volatile, versioned, or stable claims respectively; this is a
 cache revalidation control, not a claim that evidence stays correct for that long.
+Initialization separates academic search (currently OpenAlex) from general search
+(Tavily / disabled / Parallel). Choosing disabled saves `general_search_allowed=false`
+and `general_search_engine="disabled"`: no Tavily/Parallel search, fallback, or paid
+Extract calls, including after resume and in
+post-meeting Q&A. OpenAlex academic search, local materials, and direct source
+downloads/reading remain available. Global provider settings and other meetings
+are unchanged. Allowing search uses only configured backends; it does not configure
+Tavily automatically. Non-interactive startup accepts `--no-general-search` (or
+`--general-search`). Older meetings without this flag retain their existing
+behavior. New non-interactive meetings default to disabled; use
+`--academic-search-engine openalex --general-search-engine parallel` (or `tavily`)
+to select a configured engine explicitly. During a meeting, Ctrl+R → setting 9
+selects Tavily, Parallel, or disabled for subsequent calls. The Human decision is appended to the meeting's runtime
+controls; initialization manifests stay unchanged. Resume and post-meeting Q&A
+use the latest choice. Already-issued requests are not cancelled, and the
+retriever/source reader are refreshed for unstarted tasks. Turning search back
+on uses only configured backends. Quota controls alone cannot override a current
+general-search prohibition; if academic search becomes unavailable, the meeting retains progress and pauses
+instead of switching to Tavily.
 During meeting initialization, the Human chooses the OpenAlex candidate limit per
 adversarial query: pressing Enter selects the suggested 12 results, and the allowed
 range is 1–50. This is a retrieval input limit, not the number of sources that must
@@ -390,13 +449,16 @@ after Tavily source reading. A previously frozen Tavily-only result with an
 OpenAlex 429 is never overwritten: if its module evidence dossier is not yet
 frozen, a successful OpenAlex recheck adds a separate evidence packet to that
 dossier.
-Ctrl+R can change this policy for not-yet-started calls in either a new or an
+Where general search is permitted, Ctrl+R can change this policy for not-yet-started calls in either a new or an
 existing meeting, without rewriting its initialization manifest. In staged fast
 research and Representative model lanes, model changes and concurrency increases
 take effect as soon as the Human finishes the menu; decreases stop refilling
-slots until active calls drain below the new cap. After a repeated OpenAlex connection failure, Tavily
-takes over automatically when configured. Ordinary web and regulatory searches
-use Tavily as their primary discovery backend. Older meetings retain their
+slots until active calls drain below the new cap. Academic connection failures do
+not automatically trigger paid search: fallback needs explicit Human authorization.
+Ordinary web and regulatory searches use the selected general engine. Fast planning
+searches default to ACADEMIC when a model omits the classification; choosing GENERAL
+must be explicit. Finding alternative copies of OpenAlex/DOI papers uses academic
+metadata rather than automatically billing web search. Older meetings retain their
 original retrieval policy. In the fast literature workflow, independent Research
 Desk questions move through separate normalization, retrieval, source-reading,
 and synthesis queues, so a delayed search does not block earlier work on other
@@ -407,9 +469,9 @@ while exact queries, candidates, exclusions, and screening reasons remain under
 `audit_private/research/`.
 Every new Research Desk request, including requests made after resuming an older
 meeting, now reads a bounded selection of original sources *before* synthesis.
-For selected public web pages, Tavily Extract obtains page text when Tavily is
-configured; public PDFs and other documents are fetched directly and relevant
-text is extracted. The model receives only short, attributed excerpts, not an
+Selected public web pages, PDFs and other documents are fetched directly and relevant
+text is extracted. Paid Tavily Extract is used only when explicitly enabled and only
+for non-scholarly web candidates, never merely because a paper's publisher blocks access. The model receives only short, attributed excerpts, not an
 unbounded full-document dump. Read attempts, content digests, selected excerpts,
 and failures are recorded under `audit_private/research/source_reads/`. Search
 snippets remain discovery leads: a source without a readable original excerpt
@@ -746,6 +808,91 @@ ensemble-v07 resolve-consultation \
 ensemble-v07 open /absolute/path/to/M-XXXXXXXX
 ```
 
+### 公式输出格式
+
+初稿、局部/整章修订、术语公式、摘要/整合与学术重绘共享一套公式提示词：
+行内短变量使用数学定界符，块公式的 $$ 各独占一行，正文使用真实换行。
+外层 JSON 只编码一次：换行使用单次换行转义，LaTeX 命令的反斜杠编码为两个，
+aligned 的 TeX 换行编码为四个。提示词同时提供可解析的正确与错误 JSON 示例，
+区分字段内容和传输层表示，禁止把公式包进代码围栏或再序列化一层。
+这些规则只作用于后续获准生成/修改的文字，不改写冻结报告，也不新增整稿拒绝或重试门槛。
+
+智库长在原有科学审阅/复核中同时检查符号一致性，记录含义、作用域、单位、归一化与适用条件；
+主笔在已有局部修订中同步修改正文与对应术语/公式栏，不另开智库长轮次。
+符号记录为咨询材料，不自动改变异议票，也不能凭记忆填补科学定义。
+启用 Technician 的会议，每次新写作/修订产物都执行一次公式完整性检查并保存审计记录；
+新会议的主笔中间产物（包括引文修复、尚未应用的局部补丁）只执行机械检查；
+完成来源校验或逐项应用后，再对实际交付稿进行一次模型公式检查，不在中间步骤重复调用。
+可明确判定的编码和块格式错误局部修复，不能确定的建议留档，不拒绝整份产物、不重新开会或递归重试。
+模型仅接收公式片段及字段位置；无公式不调用，超大输入回退到完整机械检查，
+失败也保留原内容和安全修复，科学异议仍按原流程处理。恢复时复用已有检查，不再次付费调用。
+局部修订删除重复的术语、推断标签和图规格副本，保留编号正文、完整异议与来源关系；
+传输 JSON 去除缩进，智库长只补充当前符号/词条相关的前章约定，并注明省略范围。
+相同公式合并传给 Technician，但保留全部出现位置；快速科学审阅的证据摘录预算
+由 280,000 字符降至 120,000，与常规主笔审阅一致。完整证据档案不删改，
+被省略的发现/来源仍明确计数，审阅者不得把未展示理解成没有证据。
+
+### 治理规则版本与会议恢复
+
+新会议同时冻结 `prompt_contract_version=3` 和 `context_assembly_version=3`；
+字段缺失的旧会议仍走原提示词分支，不改写冻结稿件、票据或决议。
+新分支对继承文书去重，技术检查和 Research Desk 不自动追加整份继承报告；
+各任务仍保留自己显式提供的任务与证据。职能标题不再由治理目录的文件名决定。
+恢复查找与实际调用使用相同的会议语言、人类裁定处理。
+私有可重建索引按实际请求摘要定位回答，仍重新核验原始 exchange、模型替换时间和无效输出隔离记录；
+索引故障回退到原记录扫描，不能凭索引或模板编号采纳答案。
+输入超限修剪支持 JSON 加 Schema 的请求格式，保留 Schema、人类任务、异议和外部引用的证据条目。
+字符预算和 token 预算均检查完整 system + user 消息，不能用压缩 user 掩盖超大的 system。
+
+### 写作与科学审阅按来源 ID 补读
+
+新会议另外冻结 `evidence_read_protocol_version=1`；旧会议缺少此字段时不启用，
+已有 v1/v2 请求不因这次改动被自动改写。主笔、局部科学修订和科学审阅在已有任务中
+可请求当前公开来源的完整 finding 或本地公开原文片段，不另派模型、不联网或搜索。
+主笔沿用章内 C 引文 ID；Research Desk 的发现和原文阅读结果明确区分。
+按文件哈希核验原文，PDF 按页续读，文本按游标续读，不截断已有公式；
+未取得、未展示、扫描页无文字或上下文装不下都不等于“来源不存在”或“异议已解决”。
+未发布的 Research Round 材料、私有订阅原文、任意文件路径和软链接不开放给此入口。
+
+补读是可选只读动作：格式错误不会启动 Technician 修复或人工排障循环，
+而是要求提交最终目标产物并保留未核验限制；最终稿件、投票和异议仍走原校验流程。
+同一请求内最多执行 `evidence_read_round_limit` 个补读回合（新会议冻结默认 8），
+每回合最多两项；这只是技术执行窗口，不是允许忽略异议的科学轮次配额。
+窗口结束后停止补读，不自动通过科学审阅。补读片段和范围私有落盘，
+恢复时复用匹配的模型回答，不重复付费调用。无需补读时直接提交原目标 JSON。
+此版本接通补读能力，尚未据此大幅减少各阶段的证据预览，也未宣称实测节省 token。
+
+新会议把初始化时的完整治理规则保存在 `human_private/governance_snapshot/`，
+恢复时按原冻结 SHA-256 校验并使用该副本。更新安装目录里的规则或移动会议目录
+不再使新会议无法接续。副本若损坏则暂停，不会静默切换到新规则。
+旧会议仍可使用摘要完全匹配的历史规则包；历史副本的恢复只追加文件，不能改写
+冻结摘要、投票或成果，也不能跳过完整性校验。
+
+### 初始化后的运行方式与后台接续
+
+初始化后可选择当前终端运行、提交 Slurm `agent`（1 CPU、8GB、7 天）、
+稍后运行，或在当前机器 `nohup` 静默后台运行。后台启动需要再次确认；不填写理由。
+普通会议、文献调研、学术重绘和命题核实自动生成会议根目录的
+`resume_backstage.sh`，非交互初始化也生成，但不自动执行。脚本不含 API 密钥或
+`#SBATCH` 资源设置，使用本次安装的 Python、配置文件和对应直接执行入口，
+根据脚本所在位置定位会议。移动安装/配置文件后需相应调整入口。
+
+可在通用 Slurm 提交文件中调用：
+
+```bash
+bash /absolute/path/to/LR-XXXXXXXX/resume_backstage.sh
+```
+
+也可在合适的当前机器上手动后台启动：
+
+```bash
+nohup bash /absolute/path/to/LR-XXXXXXXX/resume_backstage.sh >ensemble-background.log 2>&1 </dev/null &
+```
+
+`nohup` 不申请集群资源，不保证 `salloc` 退出后仍保活；集群登录节点上应使用
+Slurm 提交。必须由人工处理的咨询仍会保留进度并暂停，不自动改变 AI 代裁权限。
+不要同时运行同一会议；Slurm `COMPLETED` 或后台 PID 不代表报告已完成。
+
 ### 在会议中途更换模型
 
 交互式运行的任务表底部会常驻显示快捷键：`Ctrl+C` 安全中断，`Ctrl+R` 立即打开
@@ -843,6 +990,15 @@ top-level cache fields, OpenAI/GLM `prompt_tokens_details.cached_tokens`, and
 Gemini `cachedContentTokenCount` are normalized to the same record shape.
 When a pre-telemetry meeting resumes, retained provider exchanges are backfilled
 without repeating the model calls; one summary event records the number created.
+
+New exchanges also record system/user character counts, full request/system
+digests, and estimated input tokens separately from provider-measured usage.
+Technician evidence-ranking calls are included. Future archive operations retain
+`human_private/usage_summary.json`, grouped by exact stage and provider/model, before
+raw workflow records are removed. Missing usage remains unknown; partial totals
+include coverage counts. The summary is private and is not Representative context.
+It is not a dollar-cost estimate and does not include transport failures that
+reported no token usage.
 
 If a provider reaches either an explicitly configured limit or its own output
 limit on reasoning before producing public text, the meeting pauses with

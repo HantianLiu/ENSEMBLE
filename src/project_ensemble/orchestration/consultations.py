@@ -50,10 +50,12 @@ CONSULTATION_OPTION_LABELS = {
     "RETRY_WRITER_REVISION": "要求主笔再修订一次并复核",
     "RETRY_WRITER_LOCAL_REPAIR": "只针对当前异议局部修稿，再交科学复核",
     "REWRITE_WHOLE_MODULE": "异议涉及全章结构；要求主笔重写整章后复核",
+    "SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION": "跳过失败补丁；保留现稿并列明未解决异议，继续其余报告",
     "ACCEPT_WITH_DISCLOSED_LIMITATION": "知悉未解决的科学异议，附限制说明后继续",
     "REMOVE_UNSUPPORTED_SYNTHESIS": "去除未获认可的跨模块结论后出版",
     "USE_WRITER_DEFAULT": "此项由主笔采用合理默认值，并在任务书标明",
     "APPROVE_SCOPE_CHANGE": "批准本模块提出的局部研究范围变更",
+    "DELEGATE_THIS_SCIENCE_CONSULTATION_TO_AI": "交给 AI 代裁本次科学异议（逐条给出理由，继续修订与复核）",
 }
 
 
@@ -108,7 +110,7 @@ class HumanConsultationResolution(BaseModel):
     human_wording: str | None = Field(default=None, min_length=1)
     scope: str = Field(min_length=1)
     thresholds: list[ThresholdRecord]
-    authority: Literal["HUMAN", "DELEGATED_CHAIR"] = "HUMAN"
+    authority: Literal["HUMAN", "DELEGATED_CHAIR", "DELEGATED_AI"] = "HUMAN"
     authorization_record_path: str | None = None
 
     @model_validator(mode="after")
@@ -611,7 +613,7 @@ class HumanConsultationService:
     def _resolve(
         self, *, issue_id: str, decision: str, rationale: str, scope: str,
         human_wording: str | None = None,
-        authority: Literal["HUMAN", "DELEGATED_CHAIR"],
+        authority: Literal["HUMAN", "DELEGATED_CHAIR", "DELEGATED_AI"],
         authorization_record_path: str | None,
     ) -> HumanConsultationResolution:
         self.validate_issue_id(issue_id)
@@ -646,6 +648,35 @@ class HumanConsultationService:
             or not authorization_record_path
         ):
             raise ValueError("Chair delegation is limited to scholarly science objections")
+        if authority == "DELEGATED_AI":
+            from project_ensemble.runtime.fast_science_delegation import (
+                AI_SCIENCE_DECISIONS, can_delegate_fast_science,
+            )
+
+            if (not can_delegate_fast_science(issue) or not authorization_record_path
+                    or decision not in AI_SCIENCE_DECISIONS or scope != "THIS_CONSULTATION_ONLY"):
+                raise ValueError("AI delegation is limited to authorized fast science consultations")
+            authorization_path = (self.repo.root / authorization_record_path).resolve()
+            import re
+            expected_folder = (self.repo.root / "human_private/consultations").resolve()
+            if (authorization_path.parent != expected_folder or not authorization_path.is_file()
+                    or not re.fullmatch(re.escape(issue_id) + r"\.ai_authorization(?:-\d{6})?\.json",
+                                        authorization_path.name)):
+                raise ValueError("AI delegation requires the matching Human authorization record")
+            authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
+            if (authorization.get("meeting_id") != self.repo.meeting_id
+                    or authorization.get("issue_id") != issue_id
+                    or authorization.get("authorized_by") != "HUMAN"
+                    or authorization.get("scope") != "THIS_CONSULTATION_ONLY"
+                    or authorization.get("science_recheck_required") is not True
+                    or decision not in authorization.get("allowed_decisions", [])):
+                raise ValueError("AI decision exceeds the Human's authorization")
+            standing_source = authorization.get("standing_authorization_record_path")
+            if standing_source is not None:
+                from project_ensemble.runtime.ai_delegation_settings import delegation_setting
+                enabled, source = delegation_setting(self.repo, "fast_science")
+                if not enabled or source != standing_source:
+                    raise ValueError("AI standing authorization was revoked or changed")
         resolution = HumanConsultationResolution(
             issue_id=issue_id,
             meeting_id=self.repo.meeting_id,
@@ -673,13 +704,16 @@ class HumanConsultationService:
                     "authority": authority,
                     "authorization_record_path": authorization_record_path,
                     **({"chair_rationale": rationale} if authority == "DELEGATED_CHAIR" else {}),
+                    **({"ai_rationale": rationale} if authority == "DELEGATED_AI" else {}),
                 },
                 indent=2,
                 ensure_ascii=False,
             ),
         )
         self.repo.events.append(
-            "HUMAN_CONSULTATION_RESOLVED" if authority == "HUMAN" else "DELEGATED_CHAIR_CONSULTATION_RESOLVED",
+            ("HUMAN_CONSULTATION_RESOLVED" if authority == "HUMAN"
+             else "DELEGATED_AI_CONSULTATION_RESOLVED" if authority == "DELEGATED_AI"
+             else "DELEGATED_CHAIR_CONSULTATION_RESOLVED"),
             {
                 "meeting_id": self.repo.meeting_id,
                 "issue_id": issue_id,
@@ -688,6 +722,6 @@ class HumanConsultationService:
                 "record_path": str(relative),
                 "authorization_record_path": authorization_record_path,
             },
-            actor="HUMAN" if authority == "HUMAN" else "CHAIR",
+            actor="HUMAN" if authority == "HUMAN" else "AI" if authority == "DELEGATED_AI" else "CHAIR",
         )
         return resolution

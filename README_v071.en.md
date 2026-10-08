@@ -1,4 +1,4 @@
-# Project ENSEMBLE v0.7.3
+# Project ENSEMBLE v0.7.5
 
 [中文说明](README_v071.md) · [English guide](README_v071.en.md)
 
@@ -9,7 +9,7 @@ Please use the GitHub Issues bug or research-feedback templates with synthetic
 tasks, minimal reproduction steps, and redacted screenshots. Do not post real
 meeting directories, evidence packets, API keys, or private research material.
 
-This v0.7.3 software release follows the v0.7.1 literature-writing governance
+This v0.7.5 software release follows the v0.7.1 literature-writing governance
 policy and coexists with v0.7.0 rather than upgrading its meetings in place.
 It installs `ensemble`; the older version uses `ensemble-old`. Use separate
 virtual environments. Project code and documentation are released under the
@@ -32,10 +32,70 @@ should be checked against the frozen Markdown source.
 
 Selecting body text in HTML opens a Highlight / Annotate / Ask AI toolbar.
 Highlights are stored in the local browser by default. The left-hand list
-shows compact, collapsible summaries; a plain highlight locates its source
-without covering the page, while an annotation or saved Q&A can open details.
-Entries and individual Q&A messages can be deleted. You can save a copy of
-the HTML with annotations embedded for sharing. The API key is reused only in
+shares navigation tabs with the contents; the general Ask AI button lives inside
+the annotation/Q&A tab. Search (Ctrl/Cmd+F) marks matches on
+the far-right rail. Both desktop directories share one wider column to the left
+of the article, using the left margin rather than overlapping the body. Switching
+tabs changes neither column width nor article position. The annotation directory
+shows one-line note summaries or saved questions, never full answers. Faint lines
+separate entries; each has only a Delete button. Clicking opens full Markdown,
+tables and mathematics in a right-hand detail pane. Saved Q&A can continue in a
+second, equal-width pane. Saved text annotations expand as anchored translucent
+glass cards with static, dense random grain and stronger shadows. Note cards and
+Q&A answers preview approximately five lines; full content remains available in
+the detail pane and is never truncated in storage. Plain highlights do not open
+cards or appear in the list (associated Q&A still appears). Overlapping cards
+prioritize the source anchor closest to the viewport midline, or the selected
+card, with a short transition. The page background is white; the article and
+detail/Q&A sidebars remain opaque white paper. Reduced-motion and
+reduced-transparency preferences are respected. Double-click notes to edit.
+Vertical Edit / Ask AI / Delete buttons appear on the right only after selecting
+the card (no Locate button).
+Use ☆ / ★ in the card actions, note editor or full-note pane to toggle importance.
+Starred notes have a bold directory entry and a star, plus a solid gray five-point
+star in a separate column beside the far-right position/search rail. Stars
+are larger, darker, outlined in white and shadowed for contrast; clicking one
+jumps to the original text. Ordinary annotation ticks remain on the main rail.
+Cards, their action buttons and detail panes leave space for both columns,
+without changing article layout. Stars survive browser storage and
+HTML/JSON export/import without converting older records. Plain highlights do
+not display an important-note star.
+The chapter directory tracks the current section/subsection during scrolling,
+using bold text, a pale background and a left accent bar. When needed, it scrolls
+only its own directory area to reveal the current entry, never the article.
+Tracking continues when the annotation tab is open and updates after fragment
+navigation. Printing hides both marker columns.
+The left navigation includes an optional Focus mode (off by default) and a
+White / Butter Paper palette selector. Hover over marked text, a paragraph with
+one annotation, or a note card to preview focus; click to pin it. Escape or a
+click on unmarked body text clears the pin. With no explicit focus, the visible
+note nearest the viewport midline is emphasized. Focused source text regains
+contrast with a distinct highlight; other text remains readable in muted colors.
+The matching card lifts through translation, slight scaling and layered shadows,
+while other cards become slightly gray. In Focus mode a marked-text click pins
+rather than opening a detail pane; double-click still edits. Enter/Space on a
+keyboard-focused card also pins it. The palette applies to the Q&A frame too.
+Browser preferences and annotated HTML copies retain appearance choices without
+changing annotation records or report identity. Printing removes focus dimming,
+and reduced-motion preferences disable transitions. Dark mode is not included.
+Asking AI from a highlight/annotation opens two
+equal-width panes side by side; direct Q&A opens only one overlay, without narrowing
+the body. All panes slide in from the right without changing article layout. Clicking body text
+closes panes. Selection right-click uses the reader toolbar; Shift+right-click
+keeps the native menu. Alt+Shift+H/N/A highlight, annotate, or ask AI.
+Entries and individual Q&A messages can be deleted. Save annotated HTML for
+sharing or transfer: the redesigned UI preserves the storage key and record
+format for unchanged report text. If a new local file path isolates browser
+storage, save an annotated copy in the old reader, then import it in the new
+reader. JSON export/import also works; existing local IDs take precedence,
+and a changed legacy hash is checked against the meeting and paragraph context.
+Presentation-only changes can import directly. Changed versions require exact
+unchanged paragraph anchors and explicit confirmation; legacy JSON without
+context requires unique verbatim quotations and reader confirmation instead.
+Ambiguous matches cannot migrate. Import progress and errors appear beside the
+button. Original HTML does not contain browser-local notes: save an annotated
+copy before transferring. Q&A supports tables and math.
+The API key is reused only in
 the currently open Q&A window's memory; it is not written into HTML,
 annotations, or Q&A history. Clear it before sharing a page or screen. Enter
 keys only when you trust the report and its external scripts.
@@ -47,13 +107,44 @@ blockquote. A limitation that changes a scientific conclusion's scope must
 remain visible in the main prose. Markdown footnotes (`[^note-id]`) are also
 supported, with numbered endnotes in PDF.
 
-Completed meetings can use `ensemble → Resume meeting → Add rendering formats`
+After moving a meeting, run `ensemble` from its new directory or parent and choose
+`Resume meeting → Find in the current directory`. ENSEMBLE checks that directory
+and its immediate children. A saved ID at a different path prompts before its
+location is updated; an unlisted meeting is added. Frozen meeting files are not
+rewritten. If the original config path is gone, resume can use the meeting's
+digest-checked configuration snapshot.
+Run `ensemble update` from a parent directory to register or relocate all
+meetings in that directory and its immediate children without loading model
+configuration or changing meeting files. If multiple copies share one meeting
+ID, that ID is skipped and reported instead of being assigned arbitrarily.
+
+Run `ensemble gather` to select meetings in the **current directory and its
+immediate children**. Two selections choose meetings, then Markdown/HTML/PDF
+and/or literature ZIPs. HTML/PDF automatically use the current renderer.
+Multi-selection accepts spaces, English/Chinese commas and ranges such as `1-3`.
+The default output is `会议资料.zip`. `--output` accepts a directory or ZIP filename;
+existing archives are preserved with a readable `（2）` suffix on new exports.
+Inside the outer ZIP each meeting has one title-named folder containing only
+final texts and an optional literature ZIP. No IDs, manifests or internal
+directory hierarchies are included; the literature ZIP has flat PDF basenames.
+Optional literature collection
+creates a matching PDF ZIP containing locally downloaded and human-provided PDFs,
+deduplicated by content hash; missing papers are not downloaded. Only complete
+final texts or the latest complete errata are exported. A failed meeting or format
+does not discard successful exports; issues are reported in the terminal.
+Rerendering requires no model configuration, calls no models, reopens no review,
+and does not rewrite frozen report text.
+
+Completed meetings can use `ensemble → Resume meeting → Choose from the meeting list → Add rendering formats`
 to generate HTML, PDF, or both from the latest complete post-meeting erratum
 or final Markdown, without calling a model or reopening review. This also
 works for compacted archives after hash verification. Supplementary outputs
 appear at the meeting root as `SUPPLEMENTARY_REPORT.html` and/or `.pdf`, with
 source and output hashes. A successful HTML output remains usable even if the
 PDF part fails.
+Rendering caches include the renderer code, reader assets and rendering inputs.
+An updated UI or formula parser creates a new derivative rather than reusing an
+old layout merely because the manuscript is unchanged. Frozen editions stay intact.
 
 ## Install and start
 
@@ -98,6 +189,26 @@ for an evidence-based report.
 The Audit meeting runner is not implemented, so Audit is hidden from new-meeting
 setup and cannot be created non-interactively. Existing Audit meeting files
 remain intact for a future version.
+
+A separate **lightweight audit** is now available from the home screen or
+`ensemble audit`. First select multiple meetings (spaces, Chinese commas and
+`1-3` ranges are supported), then choose mechanical checks only or add fresh,
+independent model readability reviews. Completed unarchived meetings check
+recognized vote/receipt records, revision delivery, released science rechecks
+and historical unchanged revisions. Archived meetings instead check retained
+file hashes, complete text and citations; deleted history is unavailable,
+never assumed to pass. Unfinished meetings do not disclose sealed votes.
+The tool neither modifies meetings nor automatically initiates corrections,
+and does not certify a full Audit Conference.
+
+A fresh `ensemble_audit_…` folder contains a batch summary and per-meeting
+`AUDIT_REPORT.md` / `AUDIT_REPORT.json`. Its `private_inputs` snapshots must not
+be published with public reports. Mechanical checkpoints survive model failure
+or interruption. Use `ensemble audit --no-ai` without model configuration,
+repeat `--meeting ID-or-path` to specify sources directly, or set the output
+parent with `--output /path/to/audits`. See the
+[lightweight audit protocol](docs/governance/05_audit_conference/lightweight_audit_protocol.md)
+for explicit coverage limits.
 
 You may provide a complete brief at setup or develop one with a preparatory
 Chair. That conversation designs the meeting's assignment; it is not itself
@@ -177,6 +288,14 @@ process and audit records, so that meeting cannot resume its old flow. Its
 evidence or manuscript can still seed a new meeting. An uncertified draft is
 clearly labeled as such. `public/archive_manifest.json` records retained
 files, hashes, and certification status.
+
+Literature ZIPs are on-demand exports: research refreshes originals and catalogs
+without repeatedly creating ZIP copies, and compaction does not retain ZIP caches.
+Use `ensemble gather` to export literature PDFs. Legacy archive cleanup verifies
+the archive and every ZIP member, preserves ZIP-only files and older versions,
+and records retirement in `public/archive_maintenance/literature_zip_retirement.json`.
+Frozen archive manifests remain unchanged; inheritance verifies the supplemental
+record and preserved originals before accepting a retired ZIP.
 
 Permanent deletion requires entering a confirmation phrase containing the
 meeting ID. It runs in the background and leaves a status JSON and log under

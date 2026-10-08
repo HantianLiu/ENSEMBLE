@@ -25,7 +25,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 import reportlab
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
-    BaseDocTemplate, CondPageBreak, Frame, HRFlowable, LongTable,
+    BaseDocTemplate, CondPageBreak, Frame, HRFlowable, Image, LongTable,
     PageBreak, PageTemplate, Spacer, TableStyle,
 )
 from reportlab.platypus.tableofcontents import TableOfContents
@@ -42,6 +42,7 @@ from project_ensemble.orchestration.math_rendering import (
 )
 from project_ensemble.orchestration.report_palette import DEFAULT_PALETTE, PALETTES
 from project_ensemble.orchestration.academic_html import _extract_reader_notes
+from project_ensemble.orchestration.academic_figures import GENERATED_IMAGE
 
 
 def _pdf_reader_note_fallback(markdown: str) -> str:
@@ -228,6 +229,7 @@ def _table_flowables(
 def render_academic_review_pdf(
     markdown: str, *, meeting_id: str, palette: str = DEFAULT_PALETTE,
     repair_formula: Callable[[str, str, bool], str | None] | None = None,
+    figure_assets: dict[str, bytes] | None = None,
 ) -> tuple[bytes, Path]:
     """Render approved prose with real chapter breaks, TOC, callouts and tables."""
     markdown = _pdf_reader_note_fallback(markdown)
@@ -240,12 +242,14 @@ def render_academic_review_pdf(
         return _render_academic_review_pdf(
             markdown, meeting_id=meeting_id, math_renderer=math_renderer,
             palette_colors=_pdf_colors(palette),
+            figure_assets=figure_assets,
         )
 
 
 def _render_academic_review_pdf(
     markdown: str, *, meeting_id: str, math_renderer: PdfMathRenderer,
     palette_colors: dict,
+    figure_assets: dict[str, bytes] | None = None,
 ) -> tuple[bytes, Path]:
     font_path = resolve_cjk_font()
     font = "ENSEMBLE-ACADEMIC-" + hashlib.sha256(str(font_path).encode()).hexdigest()[:10]
@@ -430,6 +434,20 @@ def _render_academic_review_pdf(
                 skip_contents = False
             else:
                 continue
+        generated = GENERATED_IMAGE.fullmatch(line)
+        if generated:
+            flush_paragraph(); flush_quote(); flush_table()
+            data = (figure_assets or {}).get(generated[2])
+            if data:
+                picture = Image(io.BytesIO(data))
+                scale = min(CONTENT_WIDTH / picture.imageWidth, 135 * mm / picture.imageHeight)
+                picture.drawWidth = picture.imageWidth * scale
+                picture.drawHeight = picture.imageHeight * scale
+                picture.hAlign = "CENTER"
+                story.extend([Spacer(1, 3 * mm), picture, Spacer(1, 2 * mm)])
+            else:
+                story.append(Paragraph(markup(generated[1]), styles["body"]))
+            continue
         if heading:
             ends_abstract = abstract_mode
             flush_paragraph(); flush_quote(); flush_table()

@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,8 @@ from project_ensemble.publication_corrigendum import ChairCorrigendumService
 from project_ensemble.orchestration.supplementary_rendering import (
     complete_render_source, render_additional_formats,
 )
+from project_ensemble.orchestration.meeting_gather import gather_collection
+from project_ensemble.audit.lightweight import ModelReader, run_lightweight_audit
 from project_ensemble.config import load_config
 from project_ensemble.user_settings import (
     configure_interactively, ensure_user_config, interface_language,
@@ -77,6 +80,9 @@ from project_ensemble.research.models import FreshnessClass, ResearchRequest, Re
 from project_ensemble.research.models import CacheInvalidationAuthority, CacheInvalidationReason
 from project_ensemble.research.openalex import OpenAlexRetriever
 from project_ensemble.research.retrievers import CompositeRetriever, PolicyResearchRetriever, TavilyRetriever
+from project_ensemble.research.search_policy import general_search_allowed, general_search_engine
+from project_ensemble.research.institutional_access import institutional_access_allowed
+from project_ensemble.providers.parallel_search import ParallelRetriever
 from project_ensemble.research.rounds import ResearchRoundRunner
 from project_ensemble.research.documents import HttpDocumentFetcher
 from project_ensemble.runtime.progress import (
@@ -102,6 +108,7 @@ from project_ensemble.startup import (
     StartupWizardCancelled,
     TerminalWizard,
     assert_models_were_discovered,
+    collapse_reasoning_effort,
     config_with_providers_enabled,
     discover_models,
     enable_utf8_terminal_erase,
@@ -110,6 +117,7 @@ from project_ensemble.startup import (
     terminal_input,
 )
 from project_ensemble.storage.events import HashChainEventLog
+from project_ensemble.runtime.terminal_style import format_directory_path
 from project_ensemble.storage.human_outputs import ensure_visible_link
 from project_ensemble.storage.legacy_migration import migrate_v06_meeting
 from project_ensemble.storage.meeting import (
@@ -122,6 +130,7 @@ from project_ensemble.storage.meeting_index import (
     meeting_index_path,
     meeting_is_complete,
     register_meeting,
+    registered_meeting,
     resolve_indexed_meeting,
 )
 from project_ensemble.storage.meeting_management import (
@@ -178,6 +187,8 @@ def _load_config(path: str | Path):
         user_config = load_config(user_path)
         providers = dict(config.providers)
         providers.update(user_config.providers)
+        from project_ensemble.search_backend_settings import merge_search_backend_settings
+        config = merge_search_backend_settings(config, user_config)
     else:
         providers = dict(config.providers)
     removed = removed_provider_ids()
@@ -610,7 +621,7 @@ def _build_research_retriever(cfg, repo: MeetingRepository | None = None):
         min_request_interval_seconds=cfg.research.openalex_min_request_interval_seconds,
     )
     retrievers = [primary_retriever]
-    if cfg.research.tavily.enabled:
+    if _tavily_available(cfg, repo):
         tavily_key = cfg.research.tavily.api_key()
         if not tavily_key:
             raise PermanentProviderError(
@@ -623,6 +634,7 @@ def _build_research_retriever(cfg, repo: MeetingRepository | None = None):
                 base_url=cfg.research.tavily.base_url,
                 timeout_seconds=cfg.research.request_timeout_seconds,
                 search_depth=cfg.research.tavily.search_depth,
+                extract_enabled=cfg.research.tavily.extract_enabled,
                 max_results_per_query=cfg.research.tavily.max_results_per_query,
                 chunks_per_source=cfg.research.tavily.chunks_per_source,
                 max_concurrent_requests=(
@@ -630,13 +642,30 @@ def _build_research_retriever(cfg, repo: MeetingRepository | None = None):
                 ),
             )
         )
+    if general_search_engine(repo) == "parallel":
+        backend = cfg.research.parallel
+        if not backend.enabled:
+            raise PermanentProviderError("Parallel was selected for this meeting but is not configured; use Settings → Search")
+        parallel_key = backend.api_key()
+        if not parallel_key:
+            raise PermanentProviderError(
+                "Parallel API key is unavailable; set "
+                f"{backend.api_key_env} or configure research.parallel.api_key_file"
+            )
+        retrievers.append(ParallelRetriever(
+            api_key=parallel_key, base_url=backend.base_url,
+            timeout_seconds=cfg.research.request_timeout_seconds,
+            mode=backend.mode, max_results_per_query=backend.max_results_per_query,
+            max_chars_total=backend.max_chars_total,
+            max_concurrent_requests=backend.max_concurrent_requests,
+        ))
     if repo is not None and (repo.root / "public/human_references/manifest.json").is_file():
         from project_ensemble.research.human_references import HumanReferenceRetriever
 
         retrievers.append(HumanReferenceRetriever(repo))
     if len(retrievers) == 1:
         return primary_retriever
-    if quota_policy == "legacy_parallel" or not isinstance(retrievers[1], TavilyRetriever):
+    if quota_policy == "legacy_parallel" or not isinstance(retrievers[1], (TavilyRetriever, ParallelRetriever)):
         return CompositeRetriever(
             retrievers,
             preserve_openalex_quota=(quota_policy == "wait"),
@@ -644,6 +673,21 @@ def _build_research_retriever(cfg, repo: MeetingRepository | None = None):
     policy_retriever = PolicyResearchRetriever(primary_retriever, retrievers[1], quota_policy=quota_policy)
     return (policy_retriever if len(retrievers) == 2
             else CompositeRetriever([policy_retriever, *retrievers[2:]]))
+
+
+def _tavily_available(cfg, repo=None) -> bool:
+    # Check the meeting permission even when a provider is globally configured.
+    return general_search_engine(repo) == "tavily" and bool(cfg.research.tavily.enabled)
+
+
+def _general_search_available(cfg, repo=None) -> bool:
+    engine = general_search_engine(repo)
+    return engine != "disabled" and bool(getattr(cfg.research, engine).enabled)
+
+
+def _remembered_general_engine(repo) -> str:
+    from project_ensemble.research.search_policy import _selection
+    return _selection(repo)[1]
 
 
 def _research_freshness_windows(cfg):
@@ -715,6 +759,10 @@ def _interactive_start_arguments(args, *, cfg_path: str | None = None):
         "representative_reasoning_effort": None,
         "chair_reasoning_effort": None,
         "enable_research": False,
+        "general_search_allowed": None,
+        "institutional_access_allowed": None,
+        "academic_search_engine": None,
+        "general_search_engine": None,
         "research_model": None,
         "research_reasoning_effort": None,
         "research_max_concurrent_claim_groups": None,
@@ -798,7 +846,7 @@ def _assert_meeting_runtime_compatible(
         repo.docs.read_text("identity_private/meeting_manifest.json")
     )
     frozen_software = manifest.get("software_version")
-    # 0.7.3 continues the 0.7.1 meeting runtime/governance format. Keep this
+    # 0.7.5 continues the 0.7.1 meeting runtime/governance format. Keep this
     # allowlist explicit; the frozen governance digest below remains the
     # semantic compatibility check.
     if not _meeting_software_version_supported(frozen_software):
@@ -821,7 +869,7 @@ def _assert_meeting_runtime_compatible(
 def _meeting_software_version_supported(frozen_version: str | None) -> bool:
     """Return whether this runtime can execute a frozen meeting format."""
 
-    # 0.7.3 continues the 0.7.1 meeting runtime/governance format. Keep this
+    # 0.7.5 continues the 0.7.1 meeting runtime/governance format. Keep this
     # allowlist explicit: the 0.7.0 line belongs to ensemble-old.
     return frozen_version in {__version__, "0.7.1"}
 
@@ -838,6 +886,18 @@ def _meeting_governance_docs(repo: MeetingRepository, configured: str | Path) ->
     frozen = json.loads(
         repo.docs.read_text("identity_private/meeting_manifest.json")
     ).get("governance_digest")
+    from project_ensemble.storage.governance_snapshot import GOVERNANCE_SNAPSHOT
+
+    snapshot = repo.root / GOVERNANCE_SNAPSHOT
+    if snapshot.exists():
+        if (snapshot.is_symlink() or not snapshot.is_dir()
+                or any(p.is_symlink() for p in snapshot.rglob("*"))
+                or directory_digest(snapshot) != frozen):
+            raise PolicyNotConfiguredError(
+                "MEETING_GOVERNANCE_SNAPSHOT_MISMATCH: 会议内的冻结治理副本完整性校验失败；"
+                "不会改用当前规则继续。"
+            )
+        return snapshot
     for candidate in (recorded, configured, *bundled_historical_governance_docs()):
         if candidate is None:
             continue
@@ -916,14 +976,9 @@ def _uses_legacy_runtime(repo: MeetingRepository) -> bool:
 
 
 def _available_meeting_paths(config_path: str | Path) -> list[Path]:
-    local = discover_local_meetings(Path.cwd())
-    # Backfill meetings made by older releases as soon as the Human opens the
-    # home screen from their parent directory.  This is metadata-only: meeting
-    # workspaces and immutable records are not changed.
-    for path in local:
-        register_meeting(path, config_path)
-    paths = list(local)
-    paths.extend(Path(entry.path) for entry in indexed_meetings(config_path))
+    # Listing must not silently replace a saved path when a copied or moved
+    # meeting with the same ID happens to be in the current directory.
+    paths = [Path(entry.path) for entry in indexed_meetings(config_path)]
     # Keep the old installation's global list discoverable without migrating
     # or mutating any v0.6 meeting.  Installed users may set an explicit path.
     legacy_config = os.environ.get("ENSEMBLE_LEGACY_CONFIG")
@@ -936,6 +991,372 @@ def _available_meeting_paths(config_path: str | Path) -> list[Path]:
         path.resolve() for path in paths
         if (path / "public/meeting_manifest.json").is_file()
     ))
+
+
+def _select_meeting_from_current_directory(
+    wizard: TerminalWizard, config_path: str | Path
+) -> Path | None:
+    """Find a nearby workspace and explicitly reconcile its catalog location."""
+
+    directory = Path.cwd().resolve()
+    candidates = discover_local_meetings(directory)
+    if not candidates:
+        print(_ui(
+            f"当前目录 {directory} 及其一级子目录中没有找到 ENSEMBLE 会议。",
+            f"No ENSEMBLE meeting was found in {directory} or its immediate subdirectories.",
+        ))
+        return None
+    entries = []
+    for path in candidates:
+        try:
+            entries.append(inspect_meeting(path))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(_ui(f"跳过无法识别的会议目录 {path}：{exc}", f"Skipping unreadable meeting directory {path}: {exc}"))
+    if not entries:
+        return None
+    if len(entries) == 1:
+        entry = entries[0]
+    else:
+        options = [
+            (item.path, f"{item.meeting_id} · {item.title} · "
+             f"{format_directory_path(item.path, color=getattr(wizard, 'color', False))}")
+            for item in entries
+        ]
+        options.append(("back", _ui("返回接续会议入口", "Back to resume menu")))
+        selected = wizard._choose_one(_ui("选择当前目录中的会议", "Choose a meeting in the current directory"), options)
+        if selected == "back":
+            return None
+        entry = next(item for item in entries if item.path == selected)
+
+    old = registered_meeting(entry.meeting_id, config_path)
+    if old is None:
+        register_meeting(entry.path, config_path)
+        print(_ui(
+            f"已将会议 {entry.meeting_id} 加入会议列表：{entry.path}",
+            f"Added meeting {entry.meeting_id} to the meeting list: {entry.path}",
+        ))
+    elif Path(old.path).expanduser().resolve() != Path(entry.path):
+        print(_ui(
+            f"会议 {entry.meeting_id} 已登记在另一个位置。\n原位置：{old.path}\n当前发现：{entry.path}",
+            f"Meeting {entry.meeting_id} is registered elsewhere.\nSaved path: {old.path}\nFound path: {entry.path}",
+        ))
+        choice = wizard._choose_one(
+            _ui("是否更新该会议在列表中的位置？", "Update this meeting's saved location?"),
+            [
+                ("update", _ui("更新位置并打开会议", "Update location and open meeting")),
+                ("once", _ui("仅本次打开，不更新列表", "Open this time without updating the list")),
+                ("back", _ui("返回接续会议入口", "Back to resume menu")),
+            ],
+        )
+        if choice == "back":
+            return None
+        if choice == "update":
+            register_meeting(entry.path, config_path)
+            print(_ui(f"已更新会议 {entry.meeting_id} 的位置。", f"Updated meeting {entry.meeting_id}'s location."))
+    else:
+        print(_ui(f"会议 {entry.meeting_id} 已在列表中，位置无需更新。", f"Meeting {entry.meeting_id} is already listed at this location."))
+    return Path(entry.path)
+
+
+def cmd_update(args) -> int:
+    """Rebuild saved locations for meetings in the current directory."""
+
+    directory = Path.cwd().resolve()
+    # The global index does not need model credentials or a readable config.
+    # An explicit config is used only to include its legacy local index.
+    index_config = args.config or directory / "ensemble.toml"
+    candidates = discover_local_meetings(directory)
+    if not candidates:
+        print(_ui(
+            f"当前目录 {directory} 及其一级子目录中没有找到 ENSEMBLE 会议。",
+            f"No ENSEMBLE meeting was found in {directory} or its immediate subdirectories.",
+        ))
+        return 0
+
+    entries = []
+    skipped = 0
+    for path in candidates:
+        try:
+            entries.append(inspect_meeting(path))
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError) as exc:
+            skipped += 1
+            print(_ui(
+                f"跳过无法识别的会议目录 {path}：{exc}",
+                f"Skipped unreadable meeting directory {path}: {exc}",
+            ), file=sys.stderr)
+
+    by_id = {}
+    for entry in entries:
+        by_id.setdefault(entry.meeting_id, []).append(entry)
+    added = updated = unchanged = 0
+    for meeting_id, matches in by_id.items():
+        if len(matches) > 1:
+            skipped += len(matches)
+            locations = "；".join(item.path for item in matches)
+            print(_ui(
+                f"跳过会议 {meeting_id}：当前目录中有多个同 ID 副本，无法确定应登记哪一个：{locations}",
+                f"Skipped meeting {meeting_id}: multiple copies with this ID were found: {locations}",
+            ), file=sys.stderr)
+            continue
+        entry = matches[0]
+        old = registered_meeting(meeting_id, index_config)
+        if old is not None and Path(old.path).expanduser().resolve() == Path(entry.path):
+            unchanged += 1
+            print(_ui(f"位置未变：{meeting_id} · {entry.path}", f"Unchanged: {meeting_id} · {entry.path}"))
+            continue
+        register_meeting(entry.path, index_config)
+        if old is None:
+            added += 1
+            print(_ui(f"已添加：{meeting_id} · {entry.path}", f"Added: {meeting_id} · {entry.path}"))
+        else:
+            updated += 1
+            print(_ui(
+                f"已更新：{meeting_id} · {old.path} → {entry.path}",
+                f"Updated: {meeting_id} · {old.path} → {entry.path}",
+            ))
+    print(_ui(
+        f"会议目录更新完成：新增 {added} 个，更新位置 {updated} 个，位置未变 {unchanged} 个，跳过 {skipped} 个。",
+        f"Meeting index updated: {added} added, {updated} relocated, {unchanged} unchanged, {skipped} skipped.",
+    ))
+    return 1 if skipped else 0
+
+
+def cmd_gather(args) -> int:
+    """Two selections, then a ZIP of the current/immediate child meetings."""
+    directory = Path.cwd().resolve()
+    wizard = TerminalWizard()
+    entries = []
+    for path in discover_local_meetings(directory):
+        if path != directory and path.parent != directory:
+            continue
+        try:
+            entries.append(inspect_meeting(path))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(_ui(f"跳过无法识别的会议目录 {path}：{exc}", f"Skipping unreadable meeting directory {path}: {exc}"))
+    if not entries:
+        print(_ui("当前目录及一级子目录中没有找到 ENSEMBLE 会议。", "No ENSEMBLE meetings were found in this directory or its immediate children."))
+        return 0
+    options = []
+    for entry in entries:
+        state = (
+            _ui("已归档", "Archived") if (Path(entry.path) / "public/archive_manifest.json").is_file()
+            else _ui("已完成", "Completed") if meeting_is_complete(entry.path)
+            else _ui("未完成", "Unfinished")
+        )
+        location = format_directory_path(entry.path, color=wizard.color)
+        options.append((entry.path, f"{entry.meeting_id} · {entry.title} · {state} · {location}"))
+    selected = wizard._choose_many(
+        _ui("选择要收集的会议（可多选；回车取消）", "Choose meetings to collect (multiple selections; Enter cancels)"),
+        options, blank_means_none=True,
+    )
+    if not selected:
+        return 0
+    contents = wizard._choose_many(
+        _ui("选择打包内容（可多选；HTML／PDF 自动使用最新排版；回车取消）", "Choose ZIP contents (multiple selections; HTML/PDF use current rendering; Enter cancels)"),
+        [("md", "Markdown"), ("html", "HTML"), ("pdf", "PDF"),
+         ("literature", _ui("文献 ZIP（内含原文 PDF，不带子目录）", "Literature ZIP (original PDFs, no subdirectories)"))],
+        blank_means_none=True,
+    )
+    if not contents:
+        return 0
+    collection = gather_collection(
+        selected, getattr(args, "output", None) or directory,
+        formats=tuple(name for name in contents if name != "literature"),
+        include_literature="literature" in contents,
+        progress=lambda title: print(_ui(f"正在打包：{title}", f"Packaging: {title}"), flush=True),
+    )
+    results = collection["meetings"]
+    for result in results:
+        if result.get("literature_zip"):
+            print(_ui(f"{result['title']}：文献包收录本地 PDF {result['pdf_count']} 份",
+                      f"{result['title']}: {result['pdf_count']} local PDFs in the literature bundle"))
+        for issue in result["issues"]:
+            print(_ui(f"未完整收集：{result['title']} · {issue}", f"Collection incomplete: {result['title']} · {issue}"), file=sys.stderr)
+    complete = sum(item["status"] == "COMPLETE" for item in results)
+    print(_ui(f"已打包：{collection['path']}；完整收集 {complete}/{len(results)} 场会议。",
+              f"ZIP ready: {collection['path']}; {complete}/{len(results)} meetings collected completely."))
+    return 0 if complete == len(results) else 1
+
+
+def cmd_audit(args) -> int:
+    """Select source meetings first; run a non-binding audit outside their roots."""
+    wizard = TerminalWizard()
+    try:
+        index_config = _config_path(getattr(args, "config", None))
+    except ValueError:
+        index_config = str(Path.cwd() / "ensemble.toml")
+    explicit = getattr(args, "meeting", None)
+    if explicit:
+        selected = []
+        for selector in explicit:
+            path = resolve_indexed_meeting(selector, index_config)
+            if path is None:
+                raise ValueError(_ui(f"没有找到会议：{selector}", f"Meeting not found: {selector}"))
+            selected.append(str(path.resolve()))
+        selected = list(dict.fromkeys(selected))
+    else:
+        paths = list(dict.fromkeys([
+            *_available_meeting_paths(index_config), *discover_local_meetings(Path.cwd()),
+        ]))
+        options = []
+        for path in paths:
+            try:
+                entry = inspect_meeting(path)
+                archived = (path / "public/archive_manifest.json").is_file()
+                state = _ui("已归档：保留文件、正文、引文与可读性", "Archived: retained files, text, citations, readability") if archived else (
+                    _ui("已完成：含可用投票与修订记录", "Completed: includes available vote and revision records")
+                    if meeting_is_complete(path) else
+                    _ui("未完成：仅公开材料，不揭示密封票", "Unfinished: public material only; no sealed votes")
+                )
+                options.append((str(path), f"{entry.meeting_id} · {entry.title} · {state} · "
+                                + format_directory_path(path, color=wizard.color)))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                print(_ui(f"跳过无法读取的会议 {path}：{exc}", f"Skipping unreadable meeting {path}: {exc}"))
+        if not options:
+            print(_ui("没有找到可审计的会议。", "No meetings found for auditing."))
+            return 0
+        selected = wizard._choose_many(
+            _ui("选择要进行轻量审计的会议（可多选；回车返回）",
+                "Select meetings for lightweight audit (multiple selections; Enter returns)"),
+            options, blank_means_none=True,
+        )
+        if not selected:
+            return 0
+    print(_ui("轻量审计只生成核验报告；不修改原会议、不自动修订，也不代替完整审计会议认证。",
+              "Lightweight auditing only produces reports; it does not modify meetings, revise text, or certify a full Audit Conference."))
+    readers = []
+    use_ai = not getattr(args, "no_ai", False)
+    requested = getattr(args, "model", None) or []
+    if use_ai and not requested:
+        mode = wizard._choose_one(
+            _ui("选择审计方式", "Choose audit mode"),
+            [("ai", _ui("程序核验＋独立 AI 可读性审读", "Mechanical checks plus independent AI readability reviews")),
+             ("mechanical", _ui("仅程序核验（无需模型配置）", "Mechanical checks only (no model configuration needed)")),
+             ("back", _ui("返回，不开始审计", "Return without auditing"))],
+        )
+        if mode == "back":
+            return 0
+        use_ai = mode == "ai"
+    if use_ai:
+        try:
+            cfg = _load_config(_config_path(getattr(args, "config", None)))
+            if not requested:
+                available_providers = [(pid, pid) for pid, provider_cfg in cfg.providers.items()
+                                       if provider_cfg.enabled]
+                if not available_providers:
+                    raise ValueError("没有启用可用于独立审读的供应商")
+                providers = wizard._choose_many(
+                    _ui("选择审读模型供应商（可多选；回车返回）", "Choose review providers (multiple selections; Enter returns)"),
+                    available_providers, blank_means_none=True,
+                )
+                if not providers:
+                    return 0
+                catalog = []
+                for provider in providers:
+                    try:
+                        catalog.extend(discover_models(cfg, [provider]))
+                    except Exception as exc:
+                        print(_ui(f"供应商 {provider} 未能列出模型：{exc}", f"Could not list models for {provider}: {exc}"))
+                if not catalog:
+                    raise ValueError("未取得可用的模型目录；可以回退为仅程序核验")
+                requested = wizard._choose_many(
+                    _ui("选择独立审读模型（每个模型各审读一次；回车返回）",
+                        "Choose independent readers (one review per model; Enter returns)"),
+                    [(f"{item.provider_id}:{item.model_id}", f"{item.provider_id}:{item.model_id}") for item in catalog],
+                    blank_means_none=True,
+                ) if catalog else []
+                if not requested:
+                    return 0
+            runtimes = list(dict.fromkeys(_provider_model(name) for name in requested))
+            effort = ReasoningEffort(getattr(args, "reasoning_effort", None) or wizard._choose_one(
+                _ui("设置独立审读的推理强度", "Set reasoning effort for independent reviews"),
+                wizard._reasoning_options(cfg, tuple(runtimes)),
+            ))
+            for provider, model in runtimes:
+                if provider not in cfg.providers:
+                    raise ValueError(f"未配置的审读供应商：{provider}")
+                provider_cfg = cfg.providers[provider]
+                effective_effort = collapse_reasoning_effort(cfg, (provider, model), effort)
+                readers.append(ModelReader(
+                    adapter=_load_adapter_for_provider(cfg, provider), model_id=model,
+                    reasoning_effort=effective_effort,
+                    max_review_chars=getattr(args, "max_review_chars", 120000),
+                    max_output_tokens=getattr(args, "max_output_tokens", None),
+                    input_token_limit=int(provider_cfg.model_input_token_limits.get(model, 0)
+                                          * cfg.governance.provider_input_context_fraction)
+                    or cfg.governance.provider_input_token_limit_fallback,
+                    progress=lambda message: print(message, flush=True),
+                ))
+        except Exception as exc:
+            print(_ui(f"AI 审读未能配置：{exc}", f"Could not configure AI review: {exc}"))
+            fallback = wizard._choose_one(
+                _ui("是否继续程序核验？AI 审读将明确标为无法核验。", "Continue mechanical checks? AI review will be marked unavailable."),
+                [("mechanical", _ui("继续程序核验", "Continue mechanical checks")),
+                 ("back", _ui("返回，不开始审计", "Return without auditing"))],
+            )
+            if fallback == "back":
+                return 0
+            readers = []
+    base = Path(getattr(args, "output", None) or Path.cwd()).expanduser().resolve()
+    if any(base.is_relative_to(Path(path).resolve()) for path in selected):
+        raise ValueError(_ui("审计输出目录必须位于被审计会议之外。", "Audit output must be outside audited meetings."))
+    base.mkdir(parents=True, exist_ok=True)
+    destination = Path(tempfile.mkdtemp(
+        prefix="ensemble_audit_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_", dir=base,
+    ))
+    print(_ui(f"审计报告保存到：{destination}", f"Audit reports will be saved in: {destination}"), flush=True)
+    results = []
+
+    def save_batch(interrupted=False):
+        summary = {"mode": "LIGHTWEIGHT_READ_ONLY", "interrupted": interrupted,
+                   "selected_meetings": selected, "readers": [reader.label for reader in readers],
+                   "results": results}
+        (destination / "audit_manifest.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        lines = ["# 批量轻量审计", "", "报告不修改原会议，不构成完整审计会议认证。", ""]
+        for item in results:
+            lines.append(f"- {item['meeting_id']} · {item.get('title', '')} · {item['status']} · "
+                         + str(item.get("output_path", item.get("error", ""))))
+        (destination / "AUDIT_SUMMARY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    save_batch()
+    for index, path in enumerate(selected, 1):
+        try:
+            entry = inspect_meeting(path)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            results.append({"meeting_id": Path(path).name, "title": "", "status": "UNAVAILABLE",
+                            "error": f"所选会议已不可读取：{exc}"})
+            save_batch()
+            continue
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", entry.meeting_id)[:64]
+        folder = destination / f"{index:03d}-{safe_id}"
+        print(_ui(f"正在审计：{entry.title}\n源会议完整位置：{path}",
+                  f"Auditing: {entry.title}\nFull source location: {path}"), flush=True)
+        try:
+            result = run_lightweight_audit(
+                path, folder, readers=tuple(readers), progress=lambda message: print(message, flush=True),
+            )
+        except KeyboardInterrupt:
+            report = folder / "AUDIT_REPORT.json"
+            if report.is_file():
+                results.append(json.loads(report.read_text(encoding="utf-8")))
+            save_batch(interrupted=True)
+            print(_ui(f"审计已停止；已完成核验保留在 {destination}，原会议未修改。",
+                      f"Audit stopped; completed checks remain in {destination}. Source meetings are unchanged."))
+            return 130
+        except Exception as exc:
+            result = {"meeting_id": entry.meeting_id, "title": entry.title,
+                      "status": "UNAVAILABLE", "error": str(exc), "output_path": str(folder)}
+        results.append(result)
+        save_batch()
+        if (folder / "AUDIT_REPORT.md").is_file():
+            print(_ui(f"核验报告：{folder / 'AUDIT_REPORT.md'} · {result['status']}",
+                      f"Audit report: {folder / 'AUDIT_REPORT.md'} · {result['status']}"), flush=True)
+        else:
+            print(_ui(f"该会议未能完成审计，原因已写入汇总：{result.get('error', '材料不可用')}",
+                      f"Audit could not complete; the summary records: {result.get('error', 'material unavailable')}"), flush=True)
+    print(_ui(f"审计完成：已处理 {len(results)} 场会议；汇总：{destination / 'AUDIT_SUMMARY.md'}",
+              f"Audit finished: processed {len(results)} meetings; summary: {destination / 'AUDIT_SUMMARY.md'}"))
+    return 0 if all(item["status"] == "CHECKED_WITHIN_SCOPE" for item in results) else 1
 
 
 def _select_existing_meeting(wizard: TerminalWizard, config_path: str | Path) -> Path | None:
@@ -979,7 +1400,7 @@ def _select_existing_meeting(wizard: TerminalWizard, config_path: str | Path) ->
                     created = _ui("创建日期", "Created") + f" {creation_time.date().isoformat()} · "
             except (AttributeError, TypeError, ValueError):
                 pass
-        location = _ui("当前目录", "Current directory") if path == Path.cwd().resolve() else str(path.parent)
+        location = format_directory_path(path, color=getattr(wizard, "color", False))
         options.append(
             (
                 str(path),
@@ -1128,6 +1549,9 @@ def _open_meeting(args, path: Path) -> int | None:
     if (repo.root / "public/archive_manifest.json").is_file() and not complete:
         raise ValueError("归档会议的保留文稿缺失或归档清单无效；请先从备份恢复，不能接续")
     wizard = TerminalWizard()
+    location = format_directory_path(repo.root, compact=False, color=getattr(wizard, "color", False))
+    print(_ui(f"会议完整目录：{location}", f"Meeting directory: {location}"),
+          file=getattr(wizard, "output", sys.stdout))
     options = []
     if not complete:
         options.append(("continue", "继续原会议流程（沿用已落盘进度）"))
@@ -1140,7 +1564,7 @@ def _open_meeting(args, path: Path) -> int | None:
     options.append(("successor", "以当前会议为来源召开新会议"))
     if complete:
         options.append(("results", "查看已完成会议的成果文件"))
-    options.append(("back", "返回会议列表"))
+    options.append(("back", _ui("返回接续会议入口", "Back to resume menu")))
     label = (_ui("已归档", "Archived") if (repo.root / "public/archive_manifest.json").is_file()
              else _ui("已完成", "Completed") if complete else _ui("未完成", "Unfinished"))
     while True:
@@ -1268,7 +1692,7 @@ def _chair_qa_interactive(repo: MeetingRepository, cfg, wizard: TerminalWizard) 
               f"Chair Q&A started · {service.certification_state} · text revision {service.revision} · {selected}"))
     print(_ui("只读取会议公开材料；新增检索仅进入问答资料库，不改变原会议。输入 /exit 退出。", "Only public meeting material is read. New retrieval enters the Q&A library, not the original meeting. Type /exit to leave."))
     while True:
-        question = terminal_input(_ui("\n你：", "\nYou: ")).strip()
+        question = terminal_input(_ui("\n我：", "\nMe: ")).strip()
         if question in {"/exit", "/quit", "退出"}:
             return 0
         if not question:
@@ -1310,7 +1734,7 @@ def _chair_corrigendum_interactive(repo: MeetingRepository, cfg, wizard: Termina
     print(_ui("输入 /typeset 可不改正文，仅用当前排版器另存完整 PDF。", "Use /typeset to save a newly formatted PDF without changing the text."))
     print(_ui("原文与所有历史版本不覆盖；本功能不启动代表审核。输入 /exit 返回。", "Source and historical versions are not overwritten; this does not reopen representative review. Type /exit to return."))
     while True:
-        instruction = terminal_input(_ui("\n你：", "\nYou: ")).strip()
+        instruction = terminal_input(_ui("\n我：", "\nMe: ")).strip()
         if instruction in {"/exit", "/quit", "退出"}:
             return 0
         if instruction == "/typeset":
@@ -1399,11 +1823,18 @@ def cmd_home(args) -> int:
                 ("existing", "接续已有会议：继续流程、向主席提问，或召开后续新会"),
                 ("manage", "管理已有会议：精简归档或彻底删除"),
                 ("settings", "设置：界面外观与模型供应商"),
+                ("audit", _ui("轻量审计已有会议：多选会议并核验", "Audit existing meetings: select meetings and check")),
                 ("quit", "退出 ENSEMBLE"),
             ],
         )
         if choice == "quit":
             return 0
+        if choice == "audit":
+            audit_args = argparse.Namespace(config=getattr(args, "config", None), meeting=None,
+                                            model=None, no_ai=False, reasoning_effort=None,
+                                            max_review_chars=120000, max_output_tokens=None, output=None)
+            cmd_audit(audit_args)
+            continue
         if choice == "settings":
             try:
                 seed = _config_path(args.config)
@@ -1442,7 +1873,21 @@ def cmd_home(args) -> int:
             except StartupWizardCancelled:
                 print("已返回 ENSEMBLE 主菜单；没有创建会议。")
                 continue
-        path = _select_existing_meeting(wizard, cfg.source_path)
+        resume_source = wizard._choose_one(
+            _ui("接续已有会议", "Resume an existing meeting"),
+            [
+                ("current", _ui("从当前目录寻找", "Find in the current directory")),
+                ("list", _ui("从会议列表选择", "Choose from the meeting list")),
+                ("back", _ui("返回主菜单", "Back to main menu")),
+            ],
+        )
+        if resume_source == "back":
+            continue
+        path = (
+            _select_meeting_from_current_directory(wizard, cfg.source_path)
+            if resume_source == "current"
+            else _select_existing_meeting(wizard, cfg.source_path)
+        )
         if path is None:
             continue
         result = _open_meeting(args, path)
@@ -1459,6 +1904,9 @@ def _manage_existing_meeting(
     except (ValueError, OSError, RuntimeError) as exc:
         print(f"无法打开该会议的管理页面：{exc}。请返回会议列表重新选择。", file=sys.stderr)
         return
+    location = format_directory_path(path, compact=False, color=getattr(wizard, "color", False))
+    print(_ui(f"会议完整目录：{location}", f"Meeting directory: {location}"),
+          file=getattr(wizard, "output", sys.stdout))
     while True:
         already_archived = (path / "public/archive_manifest.json").is_file()
         action = wizard._choose_one(
@@ -1670,6 +2118,13 @@ def cmd_start(args) -> int:
                 or args.literature_writing_policy == "fast"
                 or meeting_type in {MeetingType.RESEARCH, MeetingType.SCHOLARLY_RENDERING}
             ),
+            general_search_allowed=(args.general_search_engine != "disabled" and (
+                args.general_search_allowed if args.general_search_allowed is not None
+                else args.general_search_engine in {"tavily", "parallel"}
+            )),
+            academic_search_engine=args.academic_search_engine or "openalex",
+            institutional_access_allowed=bool(getattr(args, "institutional_access_allowed", False)),
+            general_search_engine=(args.general_search_engine or (None if args.general_search_allowed else "disabled")),
             research_model=args.research_model,
             research_reasoning_effort=(
                 ReasoningEffort(args.research_reasoning_effort or ReasoningEffort.DEFAULT.value)
@@ -1755,6 +2210,10 @@ def cmd_start(args) -> int:
                 args.representative_reasoning_effort,
                 args.chair_reasoning_effort,
                 args.enable_research,
+                args.general_search_allowed is not None,
+                args.academic_search_engine is not None,
+                args.general_search_engine is not None,
+                getattr(args, "institutional_access_allowed", None) is not None,
                 args.research_model,
                 args.research_reasoning_effort,
                 args.research_max_concurrent_claim_groups,
@@ -1844,6 +2303,14 @@ def cmd_start(args) -> int:
     print(f"会议已初始化：{repo.meeting_id}")
     print(f"配置文件：{cfg.source_path}")
     print(f"工作区：{repo.root}")
+    if selection.meeting_type != MeetingType.AUDIT:
+        from project_ensemble.runtime.slurm_launch import ensure_resume_script
+
+        script = ensure_resume_script(
+            repo, config_path=cfg.source_path, command=args._resume_cmd,
+            governance_docs=args.governance_docs,
+        )
+        print(_ui(f"后台接续脚本：{script}", f"Background resume script: {script}"))
     if cfg.governance.provider_output_token_limit is None:
         print("单次模型输出上限（控制参数）：ENSEMBLE 默认不限制，由模型供应商决定")
     else:
@@ -1889,7 +2356,7 @@ def cmd_start(args) -> int:
             + (
                 f"本次所选模型的同时在途调用上限由人类设为 {chosen_cap} 路；"
                 if chosen_cap is not None else
-                "默认每个代表模型最多 4 路同时在途调用；"
+                "每模型的并行调用上限已按初始化设置确定；"
             )
             + "并发越高，缓存命中率可能越低。"
         )
@@ -1945,6 +2412,15 @@ def cmd_start(args) -> int:
             "故障所需会议片段可能发送给该供应商；不得修改 ENSEMBLE 本体"
         )
     if not args.non_interactive:
+        if selection.meeting_type != MeetingType.AUDIT:
+            from project_ensemble.runtime.slurm_launch import offer_initialized_execution
+
+            launch_mode = offer_initialized_execution(
+                repo, config_path=cfg.source_path, command=args._resume_cmd,
+                governance_docs=args.governance_docs, language=interface_language(),
+            )
+            if launch_mode != "local":
+                return 0
         if selection.deliverable_type == DeliverableType.LITERATURE_REVIEW:
             print(_ui("开始执行文献调研报告完整流程；如有源会议，其冻结内容保持只读。", "Starting the literature-review workflow; any source meeting's frozen content remains read-only."))
             _run_literature_report(
@@ -2062,7 +2538,7 @@ def _run_research_only_locked(*, repo: MeetingRepository, cfg) -> dict:
                 "evidence_packet_path": (
                     f"public/research/evidence_packets/{packet.packet_id}.json"
                 ),
-                "literature_bundle_path": "public/research/literature_bundle.zip",
+                "literature_bundle_path": "public/research/literature_bundle",
             }
         repo.docs.write_once(
             result_relative,
@@ -2084,7 +2560,7 @@ def _ensure_research_only_links(
 ) -> None:
     for link_name, target in (
         ("RESEARCH_RESULT.json", result_relative),
-        ("LITERATURE_BUNDLE.zip", "public/research/literature_bundle.zip"),
+        ("LITERATURE_BUNDLE", "public/research/literature_bundle"),
     ):
         if not (repo.root / target).exists():
             continue
@@ -2144,6 +2620,66 @@ def cmd_science_authority(args) -> int:
     return 0
 
 
+def _interactive_ai_delegation_settings(repo, *, input_fn=terminal_input, output=None) -> None:
+    from project_ensemble.runtime.ai_delegation_settings import (
+        available_delegations, delegation_setting, delegation_model, set_delegation_settings,
+    )
+    output = output or sys.stderr
+    kinds = available_delegations(repo)
+    labels = {
+        "fast_scope": _ui("模块范围问题 · 学术主笔", "Module scope questions · Writer"),
+        "fast_science": _ui("科学异议修订 · 科学审阅员", "Scientific revision objections · Reviewer"),
+        "scholarly_science": _ui("重绘科学事实异议 · 主席", "Rendering science objections · Chair"),
+    }
+    while True:
+        print(_ui("\n┌─ 会议设置 · AI 代裁 ──", "\n┌─ Meeting settings · AI delegation ──"), file=output)
+        print(_ui("只控制本会议后续尚未裁决的受支持事项；既有裁决不变，科学修订仍须复核。",
+                  "Controls eligible unresolved items in this meeting only; existing rulings stay intact and revisions still require recheck."), file=output)
+        if not kinds:
+            print(_ui("本会议目前没有允许 AI 代裁的事项。", "No AI delegation types are supported in this meeting."), file=output)
+            return
+        print(_ui("1. 全部开启  2. 全部关闭", "1. Enable all  2. Disable all"), file=output)
+        for index, kind in enumerate(kinds, 3):
+            enabled, _ = delegation_setting(repo, kind)
+            try:
+                model = delegation_model(repo, kind)
+            except (ValueError, OSError) as exc:
+                model = _ui(f"暂不可用：{exc}", f"Unavailable: {exc}")
+            state = _ui("开", "ON") if enabled else _ui("关", "OFF")
+            print(f"{index}. {labels[kind]} [{state}] · {model}", file=output)
+        print(_ui("b. 返回（保留已保存的设置）", "b. Back (keep saved settings)"), file=output)
+        try:
+            choice = input_fn(_ui("选择开关（回车返回）: ", "Choose a switch (Enter to return): ")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice in {"", "b", "back"}:
+            return
+        if choice in {"1", "2"}:
+            settings = {kind: choice == "1" for kind in kinds}
+        elif choice.isdigit() and 3 <= int(choice) < 3 + len(kinds):
+            kind = kinds[int(choice) - 3]
+            settings = {kind: not delegation_setting(repo, kind)[0]}
+        else:
+            print(_ui("请输入菜单编号或 b。", "Enter a menu number or b."), file=output)
+            continue
+        set_delegation_settings(repo, settings)
+        print(_ui("已保存；恢复会议后对后续受支持的咨询生效，可随时在这里关闭。",
+                  "Saved for eligible future consultations on resume; you may turn it off here at any time."), file=output)
+
+
+def cmd_ai_delegation(args) -> int:
+    selector = Path(args.meeting).expanduser()
+    direct = next((candidate.resolve() for candidate in (selector, Path.cwd() / selector)
+                   if (candidate / "public/meeting_manifest.json").is_file()), None)
+    if direct is None:
+        cfg = _load_config(_config_path(args.config))
+        direct = resolve_indexed_meeting(args.meeting, cfg.source_path)
+    if direct is None:
+        raise ValueError(f"没有找到会议 {args.meeting!r}；请提供会议 ID 或完整目录")
+    _interactive_ai_delegation_settings(MeetingRepository(direct))
+    return 0
+
+
 def _prompt_for_one_consultation(
     repo: MeetingRepository,
     *,
@@ -2160,6 +2696,15 @@ def _prompt_for_one_consultation(
     if not issues:
         return False
     issue = issues[0]
+    from project_ensemble.runtime.fast_science_delegation import (
+        AUTOMATIC_SCIENCE_RETRY_LIMIT_EFFECT, try_automatic_fast_science,
+    )
+    automatic = try_automatic_fast_science(
+        repo, issue, engine=engine, max_output_tokens=max_output_tokens,
+    )
+    if automatic is not None:
+        print(_ui("AI 代裁已保存，继续修订与科学复核。", "AI ruling saved; revision and scientific recheck continue."), file=output)
+        return True
     if issue.stage == "FAST_SCOPE_QUESTION":
         from project_ensemble.runtime.fast_scope_consultation import prompt_fast_scope_consultation
         return prompt_fast_scope_consultation(
@@ -2174,6 +2719,12 @@ def _prompt_for_one_consultation(
         fast_meeting and issue.stage == "LITERATURE_WRITER_CITATION_REPAIR"
     )
     is_fast_science = issue.stage == "FAST_SCIENCE_REVIEW"
+    from project_ensemble.runtime.fast_science_delegation import (
+        AI_SCIENCE_MENU_ACTION, can_delegate_fast_science, delegate_fast_science,
+    )
+    consultation_options = list(issue.options)
+    if can_delegate_fast_science(issue) and AI_SCIENCE_MENU_ACTION not in consultation_options:
+        consultation_options.append(AI_SCIENCE_MENU_ACTION)
     is_outline_review = issue.stage == "LITERATURE_RESEARCH_OUTLINE"
     is_rendering_scope = issue.stage == "SCHOLARLY_RENDERING_SCOPE"
     is_local_science = issue.reason_code in {
@@ -2240,6 +2791,20 @@ def _prompt_for_one_consultation(
             else _ui("┌─ 人工程序咨询 ───────────────────────────────────────────────", "┌─ Human procedural consultation ───────────────────────────────"),
             file=output,
         )
+    automatic_fallback_path = (
+        repo.root / "public/procedural_consultations"
+        / f"{issue.issue_id}.ai_automatic_fallback.json"
+    )
+    if automatic_fallback_path.is_file():
+        try:
+            automatic_fallback = json.loads(automatic_fallback_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            automatic_fallback = {}
+        if automatic_fallback.get("effect") == AUTOMATIC_SCIENCE_RETRY_LIMIT_EFFECT:
+            print(_ui(
+                "│ 自动返修保护：本模块已用完 2 次会议级 AI 自动退回主笔额度；异议和当前稿均保留，本条不再自动重投。你仍可手动选择下一步（包括仅本条 AI 代裁），或附限制继续后续模块。",
+                "│ Automatic-revision guard: this module has used its two meeting-wide AI Writer retries. The objection and draft are preserved; this item will not be resubmitted automatically. You may choose the next step manually (including one-time AI delegation) or continue later modules with a disclosed limitation.",
+            ), file=output)
     stage_labels = {
         "GENERAL_PRINCIPLE_SEQUENTIAL_AMENDMENT": "总则修正案顺序处理",
         "BALLOT": "表决程序",
@@ -2251,11 +2816,21 @@ def _prompt_for_one_consultation(
         "FAST_TASKBOOK_APPROVAL": "快速文献调研 · 人类确认任务书与模块划分",
         "FAST_SCOPE_QUESTION": "快速文献调研 · 模块范围确认",
         "FAST_SCIENCE_REVIEW": "快速文献调研 · 科学异议人工决定",
+        "FAST_LOCAL_PATCH_TECHNICAL_REPAIR": "快速文献调研 · 历史修订格式故障",
+        "FAST_SCIENCE_REVISION_REOPEN": "快速文献调研 · 恢复科学修订",
         "LITERATURE_WRITER_CITATION_REPAIR": "文献调研 · 主笔引文修复待处理",
     }
     if not science_comparison and not is_outline_review and not is_rendering_scope and not is_local_science and not is_fast_science:
         print(f"│ {issue.issue_id} · {ui_text(stage_labels.get(issue.stage, issue.stage), interface_language() or 'zh')}", file=output)
         print(f"│ {issue.question}", file=output)
+        if issue.stage == "FAST_LOCAL_PATCH_TECHNICAL_REPAIR":
+            problem = issue.context.get("last_problem")
+            if problem:
+                print(_ui("│ 具体技术原因（原始诊断）：", "│ Technical cause (original diagnostic): ") + str(problem), file=output)
+            print(_ui(
+                "│ 此为旧版技术咨询；恢复会议时会撤销未处理的格式咨询，逐项修订后继续科学复核。",
+                "│ This legacy format docket is retired on resume; item-wise revision continues to science review.",
+            ), file=output)
         if issue.affected_items:
             print(_ui("│ 受影响项目: ", "│ Affected items: ") + ', '.join(issue.affected_items), file=output)
     if issue.stage == "FAST_TASKBOOK_APPROVAL":
@@ -2318,7 +2893,7 @@ def _prompt_for_one_consultation(
             else "├──────────────────────────────────────────────────────────────",
             file=output,
         )
-    for index, option in enumerate(issue.options, start=1):
+    for index, option in enumerate(consultation_options, start=1):
         print(f"│  {index}. {_option_ui(option)}", file=output)
     if engine is not None and governance_docs is not None and not is_fast_issue:
         print(
@@ -2346,6 +2921,7 @@ def _prompt_for_one_consultation(
     )
     if len(issues) > 1:
         print(_ui(f"另有 {len(issues) - 1} 条咨询排队；按一次一条处理。", f"{len(issues) - 1} more consultations are queued; resolve one at a time."), file=output)
+    print(_ui("g. 会议设置 · AI 代裁开关", "g. Meeting settings · AI delegation switches"), file=output)
     while True:
         try:
             raw = input_fn(
@@ -2358,6 +2934,12 @@ def _prompt_for_one_consultation(
         if not raw:
             print(_ui("保持 PAUSED；未记录 Human ruling。", "Meeting remains paused; no Human ruling was recorded."), file=output)
             return False
+        if raw.lower() == "g":
+            _interactive_ai_delegation_settings(repo, input_fn=input_fn, output=output)
+            return _prompt_for_one_consultation(
+                repo, input_fn=input_fn, output=output, engine=engine,
+                governance_docs=governance_docs, max_output_tokens=max_output_tokens,
+            )
         if is_outline_review and raw.lower() in {"m", "s", "a", "d", "v"}:
             detail_kind = raw.lower()
             module_index = None
@@ -2449,13 +3031,71 @@ def _prompt_for_one_consultation(
                 print(f"  {line}", file=output)
             print("", file=output)
             continue
-        if raw.isdigit() and 1 <= int(raw) <= len(issue.options):
-            decision = issue.options[int(raw) - 1]
+        if raw.isdigit() and 1 <= int(raw) <= len(consultation_options):
+            decision = consultation_options[int(raw) - 1]
+            if decision == AI_SCIENCE_MENU_ACTION:
+                standing_source = None
+                if engine is None:
+                    print(_ui("当前入口无法调用 AI；可以选择原有人工处理方式，或恢复会议后代裁。",
+                              "AI is unavailable here; choose a manual action or resume the meeting."), file=output)
+                    continue
+                from project_ensemble.errors import (
+                    ProviderError, RepresentativeUnavailableError, InputContextLimitError,
+                    OutputLimitReachedError, EmptyModelOutputError,
+                )
+                try:
+                    from project_ensemble.runtime.ai_delegation_settings import (
+                        delegation_model, set_delegation_settings,
+                    )
+                    model = delegation_model(repo, "fast_science")
+                    print(_ui(f"当前代裁模型：{model}", f"Current adjudicator model: {model}"), file=output)
+                    while True:
+                        duration = input_fn(_ui(
+                            "代裁范围：1. 仅此一次  2. 本次会议后续科学异议始终由 AI 代裁（回车默认 1；b 返回）: ",
+                            "Delegation: 1. This consultation only  2. All future science objections in this meeting (Enter: 1; b: back): ",
+                        )).strip().lower()
+                        if duration in {"", "1", "2", "b"}:
+                            break
+                        print(_ui("请输入 1、2 或 b；尚未保存授权。", "Enter 1, 2 or b; authorization not saved."), file=output)
+                    if duration == "b":
+                        continue
+                    standing_source = (set_delegation_settings(repo, {"fast_science": True})
+                                       if duration == "2" else None)
+                    print(_ui("正在由 AI 逐条审查本次科学异议……", "AI is reviewing this consultation's scientific objections…"), file=output)
+                    resolution = delegate_fast_science(
+                        repo, issue, engine=engine, max_output_tokens=max_output_tokens,
+                        standing_authorization_path=standing_source,
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    return False
+                except (ValueError, OSError, ProviderError, RepresentativeUnavailableError,
+                        InputContextLimitError, OutputLimitReachedError, EmptyModelOutputError,
+                        ResearchQualityControlError) as exc:
+                    if standing_source is not None:
+                        from project_ensemble.runtime.fast_science_delegation import record_automatic_science_fallback
+                        record_automatic_science_fallback(repo, issue, standing_source, exc)
+                    print(_ui(f"AI 代裁未完成：{exc}。原咨询仍未解决，可在下面手动选择。",
+                              f"AI ruling incomplete: {exc}. The consultation remains open; choose a manual action below."), file=output)
+                    for index, option in enumerate(consultation_options, start=1):
+                        print(f"  {index}. {_option_ui(option)}", file=output)
+                    continue
+                print(_ui(f"AI 代裁决定：{_option_ui(resolution.decision)}；{resolution.rationale}",
+                          f"AI ruling: {_option_ui(resolution.decision)}; {resolution.rationale}"), file=output)
+                if resolution.decision == "KEEP_PAUSED":
+                    if standing_source is not None:
+                        from project_ensemble.runtime.fast_science_delegation import record_automatic_science_fallback
+                        record_automatic_science_fallback(repo, issue, standing_source, resolution.rationale)
+                    print(_ui("本次保持暂停；下次恢复时可重新选择处理方式。",
+                              "Paused for this consultation; on resume you may choose another action."), file=output)
+                    return False
+                print(_ui("代裁记录已保存，继续修订和科学复核。",
+                          "Ruling saved; revision and scientific recheck continue."), file=output)
+                return True
             break
         suffix = _ui("，或输入 c 向主席提问", ", or c to ask the Chair") if engine is not None else ""
         if is_science_item:
             suffix += _ui("，输入 v 查看完整对照", ", or v to view the full comparison")
-        print(_ui(f"请输入 1-{len(issue.options)} 中的一个编号{suffix}。", f"Enter a number from 1 to {len(issue.options)}{suffix}."), file=output)
+        print(_ui(f"请输入 1-{len(consultation_options)} 中的一个编号{suffix}。", f"Enter a number from 1 to {len(consultation_options)}{suffix}."), file=output)
     if decision == "PAUSE_FOR_MANUAL_REVIEW":
         print(_ui("保持暂停；本项未保存为最终裁决，下次恢复可重新选择。",
                   "Meeting remains paused; this was not saved as a final ruling, so you may choose again on resume."), file=output)
@@ -2884,7 +3524,8 @@ def _run_literature_report_locked(
                     repo=repo, cfg=cfg, deferred=True,
                 )
                 execution.batch_daily_quota_callback = lambda error: _interactive_openalex_daily_fallback(
-                    error=error, tavily_available=bool(cfg.research.tavily.enabled),
+                    error=error, tavily_available=_general_search_available(cfg, repo),
+                    backend_label=general_search_engine(repo).title(),
                 )
                 def offer_fast_research_fallback(error) -> bool:
                     retry = _interactive_research_desk_fallback(
@@ -3358,7 +3999,7 @@ def cmd_replace_model(args) -> int:
     return 0
 
 
-def _interactive_openalex_daily_fallback(*, error, tavily_available: bool) -> bool:
+def _interactive_openalex_daily_fallback(*, error, tavily_available: bool, backend_label: str = "Tavily") -> bool:
     """Ask once after a verified daily quota event, without stopping workers."""
     output = sys.stderr
     print(_ui("\n┌─ OpenAlex 当日额度不足 ──────────────────────────────────────",
@@ -3368,11 +4009,11 @@ def _interactive_openalex_daily_fallback(*, error, tavily_available: bool) -> bo
     print(_ui("│ 其他无需新检索的任务继续在后台执行；已落盘结果不会重做。",
               "│ Other work that needs no new search continues; saved results remain intact."), file=output)
     if tavily_available:
-        print(_ui("│ 1. 授权 Tavily 接手未完成检索；保留降级标记，并尝试 OpenAlex 补检",
-                  "│ 1. Let Tavily handle pending searches; mark gaps and retry OpenAlex"), file=output)
+        print(_ui(f"│ 1. 授权 {backend_label} 接手未完成检索；保留降级标记，并尝试 OpenAlex 补检",
+                  f"│ 1. Let {backend_label} handle pending searches; mark gaps and retry OpenAlex"), file=output)
     else:
-        print(_ui("│ 备用搜索 API 未配置；可先在设置中启用 Tavily。",
-                  "│ No backup search API configured; enable Tavily in Settings first."), file=output)
+        print(_ui("│ 备用搜索未配置或被本会议禁止；本轮不会调用通用搜索后端。",
+                  "│ Backup search is unconfigured or prohibited in this meeting; no general-search calls."), file=output)
     print(_ui("│ 2. 不使用备用搜索；完成非检索工作后暂停会议",
               "│ 2. Do not use a backup; pause after non-search work finishes"), file=output)
     print("└──────────────────────────────────────────────────────────", file=output)
@@ -3445,7 +4086,7 @@ def _install_live_batch_controls(*, progress, repo, cfg, engine) -> None:
                 desk.update_model_concurrency_limit(
                     engine.participant_concurrency_limit("RESEARCH_DESK")
                 )
-                if any(item.get("control_kind") == "openalex_quota_policy"
+                if any(item.get("control_kind") in {"openalex_quota_policy", "general_search_allowed", "general_search_engine"}
                        for item in changes):
                     from project_ensemble.research.source_reading import SourceReader
                     retriever = _build_research_retriever(cfg, repo)
@@ -3692,7 +4333,7 @@ def _interactive_run_control(*, repo: MeetingRepository, cfg, mode: int,
     manifest = json.loads((repo.root / "identity_private/meeting_manifest.json").read_text(encoding="utf-8"))
     kind: str
     target: str | None
-    value: int | str
+    value: int | str | bool
     if mode == 3:
         if not manifest.get("research_model"):
             print(_ui("本会议未启用 Research Desk。", "Research Desk is disabled in this meeting."), file=output)
@@ -3748,28 +4389,83 @@ def _interactive_run_control(*, repo: MeetingRepository, cfg, mode: int,
         labels = {
             "legacy_parallel": _ui("旧会并行检索", "legacy parallel search"),
             "wait": _ui("确认当日耗尽时由人类裁定", "ask Human on confirmed daily exhaustion"),
-            "tavily": _ui("限流时用 Tavily 补读，并尝试 OpenAlex 补检",
-                          "read with Tavily during rate limits, then retry OpenAlex"),
+            "tavily": _ui("限流时用 Tavily 补检，并尝试 OpenAlex 补检",
+                          "search with Tavily during rate limits, then retry OpenAlex"),
+            "parallel": _ui("限流时用 Parallel 补检，并尝试 OpenAlex 补检",
+                            "search with Parallel during rate limits, then retry OpenAlex"),
         }
         print(_ui(f"当前 OpenAlex 额度策略：{labels.get(current, current)}。",
                   f"Current OpenAlex quota policy: {labels.get(current, current)}."), file=output)
         print(_ui("  1. 确认当日额度耗尽时询问是否用备用搜索；未知 429 短时退避重试（默认）",
                   "  1. Ask whether to use backup search on daily exhaustion; retry unknown 429s (default)"), file=output)
-        tavily_enabled = bool(cfg.research.tavily.enabled)
+        tavily_enabled = _general_search_available(cfg, repo)
         if tavily_enabled:
-            print(_ui("  2. 限流时先用 Tavily 补读原文，再尝试 OpenAlex 补检；未补成则标记覆盖不足（默认）",
-                      "  2. Read originals with Tavily, then retry OpenAlex; flag gaps if still unavailable (default)"), file=output)
+            backend_label = general_search_engine(repo).title()
+            print(_ui(f"  2. 预授权限流时用 {backend_label} 补检，再尝试 OpenAlex；未补成标记覆盖不足",
+                      f"  2. Authorize {backend_label} search during rate limits, then retry OpenAlex; flag remaining gaps"), file=output)
         else:
-            print(_ui("  Tavily 未启用；先在设置中配置，才可选择方案 2。",
-                      "  Tavily is disabled; configure it in Settings before choosing option 2."), file=output)
+            print(_ui(
+                "  本会议当前禁止通用搜索；请在会议设置第 9 项允许通用搜索后再调整额度策略。"
+                if not general_search_allowed(repo) else "  所选通用引擎未启用；先在设置中配置，才可选择方案 2。",
+                "  General search is currently prohibited; allow it in meeting setting 9 before changing quota fallback."
+                if not general_search_allowed(repo) else "  The selected general engine is disabled; configure it in Settings before choosing option 2.",
+            ), file=output)
         selected = _replacement_menu_choice(_ui("选择额度策略", "Choose quota policy"),
                                              2 if tavily_enabled else 1, output=output)
         if selected is None:
             return None
-        kind, target, value = "openalex_quota_policy", None, "tavily" if selected == 1 else "wait"
+        kind, target, value = "openalex_quota_policy", None, general_search_engine(repo) if selected == 1 else "wait"
         if value == current:
             print(_ui("额度策略未改变。", "Quota policy is unchanged."), file=output)
             return None
+    elif mode == 10:
+        current = institutional_access_allowed(repo)
+        print(_ui(f"本会议机构访问当前为：{'允许' if current else '禁止'}。",
+                  f"Institutional source access: {'allowed' if current else 'disabled'}."), file=output)
+        print(_ui("  1. 允许利用运行机器已有的机构权限直接读取出版者原文",
+                  "  1. Allow direct publisher reading using this machine's existing institutional access"), file=output)
+        print(_ui("  2. 关闭；后续仅尝试公开原文，不删除已有证据",
+                  "  2. Disable; future reads use public originals only; existing evidence stays intact"), file=output)
+        print(_ui("  不配置账号或代理、不绕过登录；每篇有界尝试且失败缓存。订阅原件私有保存，不默认打包导出。",
+                  "  No credentials/proxy setup or login bypass; bounded attempts with failure caching. Subscription originals stay private and are excluded from exports."), file=output)
+        selected = _replacement_menu_choice(_ui("选择机构访问许可", "Choose institutional-access permission"), 2, output=output)
+        if selected is None or (selected == 0) == current:
+            return None
+        kind, target, value = "institutional_access_allowed", None, selected == 0
+    elif mode == 9:
+        current = general_search_allowed(repo)
+        current_engine = general_search_engine(repo)
+        print(_ui(f"本会议通用搜索当前为：{current_engine}。",
+                  f"General search for this meeting: {current_engine}."), file=output)
+        print(_ui("  1. Tavily（显式 basic；仅用于明确的通用问题或已授权回退）",
+                  "  1. Tavily (explicit basic; general questions or authorized fallback only)"), file=output)
+        print(_ui("  2. 禁止通用搜索（保留 OpenAlex 学术检索、本地资料与原文直接读取）",
+                  "  2. Prohibit general search (keep OpenAlex, local sources and direct source reading)"), file=output)
+        print(_ui("  3. Parallel（fast／turbo，每次最多 10 条，不自动调用付费 Extract）",
+                  "  3. Parallel (fast/turbo, at most 10 results, no automatic paid Extract)"), file=output)
+        print(_ui("  仅影响本会议后续调用，接续会议时沿用；不取消已经发出的请求。",
+                  "  Future calls in this meeting only; retained on resume. Already-issued requests are not cancelled."), file=output)
+        if not cfg.research.tavily.enabled:
+            print(_ui("  Tavily 尚未配置；选择允许不会自动配置或启用全局后端。",
+                      "  Tavily is not configured; allowing search does not configure/enable a global backend."), file=output)
+        selected = _replacement_menu_choice(_ui("选择通用搜索引擎／禁用", "Choose general-search engine / disable"), 3, output=output)
+        if selected is None:
+            return None
+        engine = ("tavily", "disabled", "parallel")[selected]
+        if engine == "parallel" and not cfg.research.parallel.enabled:
+            print(_ui("Parallel 未配置；请先在设置 → 联网检索配置密钥。设置未改变。",
+                      "Configure Parallel credentials in Settings → Search first. Nothing changed."), file=output)
+            return None
+        if engine == current_engine:
+            print(_ui("通用搜索许可未改变。", "General-search permission is unchanged."), file=output)
+            return None
+        # Preserve the old boolean controls when they suffice; switching
+        # providers is a separate, append-only, meeting-local engine decision.
+        if engine == "disabled" or (engine == "tavily" and current_engine != "parallel"
+                                     and _remembered_general_engine(repo) == "tavily"):
+            kind, target, value = "general_search_allowed", None, engine != "disabled"
+        else:
+            kind, target, value = "general_search_engine", None, engine
     else:
         participants = meeting_participant_ids(repo)
         print(_ui("\n选择要调整推理强度的参与者：", "\nChoose a participant's reasoning effort:"), file=output)
@@ -3803,21 +4499,14 @@ def _interactive_run_control(*, repo: MeetingRepository, cfg, mode: int,
         kind, value = "reasoning_effort", efforts[selected_effort]
         print(_ui("供应商不支持所选档位时，仍按该供应商的兼容映射发送合法值。",
                   "Unsupported effort levels still use the provider's compatible mapping."), file=output)
-    reason = terminal_input(_ui("调整原因（必填；b 返回；q 安全退出）: ",
-                                "Reason for change (required; b back; q exit): ")).strip()
-    if reason.lower() in {"q", "quit", "退出"}:
-        raise KeyboardInterrupt
-    if reason.lower() in {"b", "back", "返回", ""}:
-        print(_ui("未保存设置。", "Setting was not saved."), file=output)
-        return None
     change = {"kind": "runtime_control", "control_kind": kind,
-              "target": target, "value": value, "reason": reason}
+              "target": target, "value": value, "reason": None}
     if deferred:
         print(_ui("设置已提交；菜单关闭后对尚未启动的子任务生效，在途请求不取消。",
                   "Change submitted; it applies to unstarted tasks after this menu; active calls continue."), file=output)
         return [change]
     with repo.exclusive_run_lock():
-        record_run_control(repo, kind=kind, target=target, value=value, reason=reason)
+        record_run_control(repo, kind=kind, target=target, value=value)
     print(_ui("设置已记录；冻结初始配置未改写，后续调用使用新值。",
               "Change recorded; frozen initialization stays intact and future calls use the new value."), file=output)
     return []
@@ -3831,27 +4520,37 @@ def _interactive_model_replacement(
 
     output = sys.stderr
     while True:
-        print(_ui("\n┌─ 模型与运行参数 ─────────────────────────────────────────", "\n┌─ Models and runtime controls ─────────────────────────────"), file=output)
+        print(_ui("\n┌─ 会议设置 · 模型、运行参数与 AI 代裁 ───────────────────", "\n┌─ Meeting settings · Models, runtime and AI delegation ─────"), file=output)
         print(_ui("│ 1. 替换某个代表（也可选择 CHAIR / RESEARCH_DESK）", "│ 1. Replace one participant (including CHAIR / RESEARCH_DESK)"), file=output)
         print(_ui("│ 2. 替换某个模型的全部当前使用者", "│ 2. Replace all current users of one model"), file=output)
         print(_ui("│ 3. 调整 Research Desk 独立问题并行度", "│ 3. Change Research Desk independent-task parallelism"), file=output)
         print(_ui("│ 4. 调整某个模型的同时在途调用上限", "│ 4. Change one model's simultaneous-call cap"), file=output)
         print(_ui("│ 5. 调整某个参与者的推理强度", "│ 5. Change one participant's reasoning effort"), file=output)
-        print(_ui("│ 6. 调整 OpenAlex 额度耗尽时是否改用 Tavily", "│ 6. Choose whether Tavily replaces OpenAlex after quota exhaustion"), file=output)
+        print(_ui("│ 6. 调整 OpenAlex 额度耗尽时是否改用所选通用引擎", "│ 6. Choose whether the selected general engine replaces OpenAlex after quota exhaustion"), file=output)
         if deferred and allow_force_stop:
             print(_ui("│ 7. 强制中止当前在途模型调用；保留已落盘进度，随后选择替代模型",
                       "│ 7. Force-stop active calls; keep saved work, then choose a replacement"), file=output)
+        print(_ui("│ 8. AI 代裁：查看模型，按类型开关或全部开关", "│ 8. AI delegation: inspect models, toggle types or enable/disable all"), file=output)
+        print(_ui("│ 9. 本会议通用搜索：Tavily／Parallel／禁用",
+                  "│ 9. General search for this meeting: Tavily / Parallel / disabled"), file=output)
+        print(_ui("│ 10. 本会议机构订阅原文访问：开启／关闭",
+                  "│ 10. Institutional source access for this meeting: enable / disable"), file=output)
         print(_ui("│ b. 取消更换，继续会议   q. 安全退出会议", "│ b. Cancel and continue   q. Safely exit meeting"), file=output)
         print("└──────────────────────────────────────────────────────────", file=output)
         mode_index = _replacement_menu_choice(
             _ui("选择操作", "Choose action"),
-            7 if deferred and allow_force_stop else 6,
+            10,
             output=output,
         )
         if mode_index is None:
             return [] if deferred else None
-        if deferred and mode_index == 6:
-            return [{"kind": "force_stop"}]
+        if mode_index == 7:
+            _interactive_ai_delegation_settings(repo, output=output)
+            continue
+        if mode_index == 6:
+            if deferred and allow_force_stop:
+                return [{"kind": "force_stop"}]
+            continue
         mode = str(mode_index + 1)
         if mode_index >= 2:
             changed = _interactive_run_control(
@@ -3937,14 +4636,6 @@ def _interactive_model_replacement(
                 if (target_provider, target_model) == source_model:
                     print(_ui("目标模型与当前模型相同，请选择另一个模型。", "Target is the current model; choose another."), file=output)
                     continue
-                reason = terminal_input(_ui("替换原因（必填；b 返回；q 安全退出）: ", "Replacement reason (required; b back; q safe exit): ")).strip()
-                if reason.lower() in {"q", "退出", "quit"}:
-                    raise KeyboardInterrupt
-                if reason.lower() in {"b", "返回", "back", ""}:
-                    if not reason:
-                        print(_ui("替换原因不能为空；输入 b 返回上一级。", "Reason cannot be empty; enter b to go back."), file=output)
-                        continue
-                    continue
                 if deferred:
                     targets = (
                         [participant_id]
@@ -3960,7 +4651,7 @@ def _interactive_model_replacement(
                     )
                     return [
                         {"participant_id": candidate, "provider_id": target_provider,
-                         "model_id": target_model, "reason": reason}
+                         "model_id": target_model, "reason": None}
                         for candidate in targets
                     ]
                 with repo.exclusive_run_lock():
@@ -3970,7 +4661,7 @@ def _interactive_model_replacement(
                             participant_id=participant_id,
                             provider_id=target_provider,
                             model_id=target_model,
-                            reason=reason,
+                            reason=None,
                         )]
                     else:
                         records = service.replace_all_using(
@@ -3978,7 +4669,7 @@ def _interactive_model_replacement(
                             from_model_id=source_model[1],
                             provider_id=target_provider,
                             model_id=target_model,
-                            reason=reason,
+                            reason=None,
                         )
                 print(
                     _ui(f"已替换 {len(records)} 个运行时；历史记录不变，后续调用使用新模型。", f"Replaced {len(records)} runtimes; history is unchanged and later calls use the new model."),
@@ -4014,6 +4705,26 @@ def _main_impl() -> int:
     p = sub.add_parser("settings", help="configure appearance, model providers, search, and evidence freshness")
     p.add_argument("--config", help="optional source configuration to copy on first setup")
     p.set_defaults(func=cmd_settings)
+
+    p = sub.add_parser("update", help="register or relocate meetings in the current directory and its immediate children")
+    p.add_argument("--config", help="optional configuration path for reading a legacy local meeting index")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("gather", help="package selected local meetings in a ZIP with one title-named folder per meeting")
+    p.add_argument("--output", help="output ZIP filename or directory; defaults to 会议资料.zip in the current directory")
+    p.set_defaults(func=cmd_gather)
+
+    p = sub.add_parser("audit", help="select meetings for lightweight read-only checks and independent readability reviews")
+    p.add_argument("--config", help="model configuration; not needed with --no-ai")
+    p.add_argument("--meeting", action="append", help="optional meeting ID/path; repeat to bypass the meeting list")
+    audit_mode = p.add_mutually_exclusive_group()
+    audit_mode.add_argument("--model", action="append", help="independent reviewer provider:model; repeat for multiple readers")
+    audit_mode.add_argument("--no-ai", action="store_true", help="mechanical checks only, without model configuration")
+    p.add_argument("--reasoning-effort", choices=[item.value for item in ReasoningEffort])
+    p.add_argument("--max-review-chars", type=int, default=120000, help="maximum document characters per model review")
+    p.add_argument("--max-output-tokens", type=int, default=None)
+    p.add_argument("--output", help="parent directory for a fresh audit output folder")
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("open", help="open a meeting menu by ID/path: continue, ask Chair, or create successor")
     p.add_argument("selector", help="meeting ID or meeting workspace path")
@@ -4138,6 +4849,14 @@ def _main_impl() -> int:
     p.add_argument("--representative-reasoning-effort", choices=[x.value for x in ReasoningEffort])
     p.add_argument("--chair-reasoning-effort", choices=[x.value for x in ReasoningEffort])
     p.add_argument("--enable-research", action="store_true")
+    p.add_argument("--general-search", dest="general_search_allowed",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="allow/forbid general-Web services for this meeting only; --no-general-search blocks Tavily and Parallel search, fallback and Extract")
+    p.add_argument("--academic-search-engine", choices=("openalex",), help="academic search engine for this meeting")
+    p.add_argument("--institutional-access", dest="institutional_access_allowed",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="authorize direct publisher reading using the execution node's existing institutional access; originals remain private")
+    p.add_argument("--general-search-engine", choices=("tavily", "parallel", "disabled"), help="meeting-local general search; defaults to disabled for new meetings")
     p.add_argument("--research-model", type=_provider_model)
     p.add_argument("--research-reasoning-effort", choices=[x.value for x in ReasoningEffort])
     p.add_argument("--research-max-concurrent-claim-groups", type=int,
@@ -4146,8 +4865,8 @@ def _main_impl() -> int:
                    help="up to four concurrent independent representative calls per base model; default on for literature reviews")
     p.add_argument("--model-concurrency-limit", type=int,
                    help="initial simultaneous-call cap per selected base model (1–16)")
-    p.add_argument("--openalex-quota-policy", choices=("wait", "tavily"),
-                   help="on confirmed daily OpenAlex exhaustion: ask Human (wait) or pre-authorize Tavily")
+    p.add_argument("--openalex-quota-policy", choices=("wait", "tavily", "parallel"),
+                   help="on confirmed daily OpenAlex exhaustion: ask Human (wait) or pre-authorize the selected web engine")
     p.add_argument("--task")
     p.add_argument("--title", help="human-readable meeting title; defaults to a task-derived title")
     p.add_argument("--email")
@@ -4180,6 +4899,11 @@ def _main_impl() -> int:
     p.add_argument("--config", help="会议 ID 不在当前目录时，可用配置文件定位全局会议索引")
     p.add_argument("--mode", choices=["human", "chair"], help="omit to inspect the current setting")
     p.set_defaults(func=cmd_science_authority)
+
+    p = sub.add_parser("ai-delegation", help="meeting settings: toggle all supported AI delegation types")
+    p.add_argument("--meeting", required=True)
+    p.add_argument("--config", help="optional configuration for locating indexed meetings")
+    p.set_defaults(func=cmd_ai_delegation)
 
     p = sub.add_parser(
         "run-general",
@@ -4281,7 +5005,7 @@ def _main_impl() -> int:
         type=_provider_model,
         help="目标运行时，格式 provider:model",
     )
-    p.add_argument("--reason", required=True, help="替换原因；会进入治理层审计记录")
+    p.add_argument("--reason", help="可选替换说明；提供后会进入治理层审计记录")
     p.set_defaults(func=cmd_replace_model)
 
     argv = sys.argv[1:]
@@ -4290,6 +5014,9 @@ def _main_impl() -> int:
     known_commands = {
         "home",
         "settings",
+        "update",
+        "gather",
+        "audit",
         "open",
         "resume",
         "start",
@@ -4302,6 +5029,7 @@ def _main_impl() -> int:
         "request-human",
         "resolve-consultation",
         "science-authority",
+        "ai-delegation",
         "run-general",
         "run-report",
         "run-render",

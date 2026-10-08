@@ -36,6 +36,41 @@ def test_fast_workflow_nests_module_stages_under_active_major_step(tmp_path, mon
     assert "✓ RM-01" in rendered and "○ RM-04" in rendered
 
 
+def test_fast_stage_transition_clears_stale_module_and_task_batch(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    save_interface_language("zh")
+    progress = ConsoleProgressReporter(io.StringIO(), color=False, live=True)
+    monkeypatch.setattr(progress, "_terminal_height", lambda: 50)
+    progress.fast_workflow_stage(2)
+    progress.fast_planning_step(
+        section_id="RM-08", section_index=8, section_total=8,
+        title="线张力", detail="主笔制定执行单",
+    )
+    progress.task_batch_started([
+        TaskProgressItem(task_id="fast-plan-RM-08", participant_id="WRITER"),
+    ], title="RM-08 · 主笔制定模块执行单")
+    progress.task_finished("fast-plan-RM-08", detail="执行单与范围决定已冻结")
+
+    progress.fast_workflow_stage(3)
+    progress.fast_workflow_stage(4)
+
+    lines = "\n".join(progress._table_lines_locked())
+    assert "● 4/5 · 逐模块写作与科学审阅" in lines
+    assert "RM-08" not in lines
+    assert "制定执行单" not in lines
+    assert not progress._tasks
+    assert progress._rendering_step is None
+
+    progress.literature_step(
+        section_id="RM-02", section_index=2, section_total=8,
+        title="科学证据", stage="science", detail="第 1 版 · 科学事实审阅",
+    )
+    progress.call_started("R-TEST", "fast_science_review_RM-02_v1")
+    lines = "\n".join(progress._table_lines_locked())
+    assert "RM-02" in lines and "R-TEST" in lines
+    assert "RM-08" not in lines
+
+
 def test_deliberation_and_rendering_share_major_step_tree(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     save_interface_language("zh")

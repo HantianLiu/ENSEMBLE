@@ -26,6 +26,12 @@ from project_ensemble.orchestration.literature_report_execution import (
     _effective_chapter_citation_catalog_path, _source_identity_key,
     _normalize_chapter_citation_ids,
 )
+from project_ensemble.orchestration.literature_style import FORMULA_REVIEW_RULES
+from project_ensemble.orchestration.math_integrity import NotationRecord, audit_math_round
+from project_ensemble.runtime.prompt_contract import prompt_contract_version
+from project_ensemble.orchestration.academic_figures import (
+    FIGURE_REVIEW_RULES, figure_citation_prose, prepare_figures, writer_figure_skill,
+)
 from project_ensemble.runtime.model_lanes import run_bounded_representative_lanes
 from project_ensemble.orchestration.readability_policy import reader_style_policy
 
@@ -140,6 +146,8 @@ class ScienceChecklist(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     issues: list[ScienceIssue] = Field(default_factory=list, max_length=12)
     glossary_corrections: list[str] = Field(default_factory=list, max_length=24)
+    notation_bookkeeping: list[NotationRecord] = Field(default_factory=list, max_length=80)
+    formula_format_notes: list[str] = Field(default_factory=list, max_length=24)
 
 
 class ScienceIssueCluster(BaseModel):
@@ -934,6 +942,10 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
     )
     decisions = json.loads(dispositions.read_text(encoding="utf-8")) if dispositions else None
     review = json.loads(review_path.read_text(encoding="utf-8")) if review_path else None
+    ai_science_rulings = []
+    if review_path is not None:
+        from project_ensemble.runtime.fast_science_delegation import science_rulings_for_review
+        ai_science_rulings = science_rulings_for_review(runner.repo, module.module_id, review_path)
     revision_docket = []
     if review is not None:
         original_review = review
@@ -990,7 +1002,7 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
         "不要在普通正文裸写 Unicode 希腊字母；上下标也必须放在数学标记内。"
         "积分、求和或较长公式即使没有等号也宜单独成行。"
         "不要把一个公式拆成几个互不闭合的数学片段；中文积分域写在明确的下标中，"
-        "例如 \\int_{\\mathrm{盒宽}}；JSON 字符串中的反斜杠必须正确转义。"
+        "例如 \\int_{\\mathrm{盒宽}}；公式与换行按统一公式输出格式进行一次 JSON 编码，不得过度转义。"
         "每个正文论断使用冻结目录中的具体 C 文献编号；知识卡的内部追溯由系统维护。"
         "输出中的 cited_packet_ids 留空，由系统根据正文 C 引文回填；"
         "若提出提纲偏离，只填写 new_evidence_citation_ids，不填写内部证据编号。"
@@ -999,6 +1011,7 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
         "若异议成立，删除或改正原句，不可只添加笼统免责声明却保留未证实断言；"
         "若异议本身错误，必须找到具体的冻结来源支持或运行日期依据，不能为了迎合异议删去正确内容。"
         "在 revision_responses 中逐项写 issue_id、处理方式（已修订/有据保留/仍待查）和简短理由；"
+        "若输入含 ai_science_rulings，请参考其逐条证据理由；仍须回应全部原科学异议并接受复核。"
         "这些回应只供内部复核，不能写进正文。保留未解决的证据边界。"
         "同时维护独立于正文篇幅预算的读者术语表。对本章首次出现、目标读者可能不熟悉的"
         "概念、方法、可观测量、模型参数、缩写和重要数学符号逐项给出真正可独立阅读的解释；"
@@ -1037,6 +1050,7 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
         "一律使用读者能理解的章节主题，不输出这些内部编号。"
         "证据、文献目录和滚动术语表均为有界输入视图；省略项不等于证据不存在。"
         + (_FACT_FIRST_WRITING_RULES if fact_first else "")
+        + "\n" + writer_figure_skill() + "\n"
         + "只返回 JSON。",
         _writer_visible_payload({"module": module.model_dump(mode="json"),
          "approved_outline": json.loads(outline_path.read_text(encoding="utf-8")),
@@ -1050,11 +1064,18 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
          "previous_draft": previous_payload,
          "review_decisions": decisions,
          "prior_science_checklists": review,
+         "ai_science_rulings": ai_science_rulings,
          "revision_docket": revision_docket,
          "writing_preferences": runner._writing_preferences()}, catalog),
     )
     def citation_issues(candidate: WriterChapter) -> list[str]:
-        prose = candidate.draft.body_markdown + "\n" + candidate.draft.short_summary
+        # Optional picture format failures must not replay/reject valid prose.
+        body, figures, diagnostics = prepare_figures(candidate.draft.body_markdown, candidate.draft.figures, catalog)
+        candidate.draft = candidate.draft.model_copy(update={
+            "body_markdown": body, "figures": figures,
+            "figure_diagnostics": [*candidate.draft.figure_diagnostics, *diagnostics],
+        })
+        prose = candidate.draft.body_markdown + "\n" + candidate.draft.short_summary + "\n" + figure_citation_prose(figures)
         used = set(_CHAPTER_SOURCE_MARKER.findall(prose))
         allowed_citations = {entry["citation_id"] for entry in catalog["sources"]}
         problems = []
@@ -1200,6 +1221,12 @@ def _writer_chapter(runner, module, version: int, dossier_path: Path,
     )
     runner._validate_citations(draft.cited_packet_ids)
     frozen = chapter.model_copy(update={"draft": draft})
+    if prompt_contract_version(runner.repo.root) >= 2:
+        frozen = audit_math_round(
+            runner, "WRITER", f"literature_v071_writer_{module.module_id}_v{version}_completed_round",
+            frozen,
+        )
+        draft = frozen.draft
     normalized_relative = base / f"writer_v{version}_validated.json"
     _freeze(runner, normalized_relative, frozen)
     draft_relative = _module_base(module) / "drafts" / f"v071-v{version}.json"
@@ -1313,7 +1340,10 @@ def _science_round(runner, module, version: int, chapter: WriterChapter,
             f"literature_v071_science_{module.module_id}_r{version}",
             "核查当前模块草稿的科学性和来源边界。每条异议仅针对一个具体位置和一个科学判断；"
             "指出为何重要及关联证据，不重写整章。纯风格意见不要充当科学异议。"
-            "若上一轮已解决，不重复提出；若返修稿仍有问题，指向当前文本。"
+            + FORMULA_REVIEW_RULES
+            + FIGURE_REVIEW_RULES
+            + "若缺少的是公式表解释，具体指出词条和缺失的说明，并写入 glossary_corrections。"
+            + "若上一轮已解决，不重复提出；若返修稿仍有问题，指向当前文本。"
             "检查术语表是否遗漏本章理解所必需的概念，解释是否真正定义对象、条件和符号，"
             "优先检查读者专业度较低的学科中、本章关键结论所依赖的专门算法、几何构造、参数与判据；"
             "不要因为解释了相关普通词或相近方法，就视为关键方法本身已有定义。"
@@ -1546,7 +1576,8 @@ def _local_science_check(runner, module, prior: WriterChapter,
     prior_glossary = [item.model_dump(mode="json") for item in prior.glossary_additions]
     final_glossary = [item.model_dump(mode="json") for item in final.glossary_additions]
     glossary_changed = prior_glossary != final_glossary
-    if not changes and not glossary_changed:
+    figures_changed = prior.draft.figures != final.draft.figures
+    if not changes and not glossary_changed and not figures_changed:
         _freeze(runner, relative, {"status": "PASS", "reason": "NO_CHANGED_PARAGRAPHS_OR_GLOSSARY",
                                    "checks": []})
         return path
@@ -1582,16 +1613,20 @@ def _local_science_check(runner, module, prior: WriterChapter,
             "只核对第二轮科学审阅之后改动的段落、术语定义及其引用证据。"
             "检查返修是否忠实回应异议且没有引入新的实质错误；"
             "review_evidence 是相关证据的有界摘录，省略项不等于没有证据。"
-            "不要重开整章审阅或要求扩展研究范围。只返回 JSON。",
+            "不要重开整章审阅或要求扩展研究范围。"
+            + FIGURE_REVIEW_RULES + "只返回 JSON。",
             {"module": module.model_dump(mode="json"), "changed_paragraphs": changes,
              "review_evidence": review_evidence,
              "prior_glossary_additions": prior_glossary,
-             "final_glossary_additions": final_glossary},
+             "final_glossary_additions": final_glossary,
+             **({"prior_figures": prior.draft.figures, "final_figures": final.draft.figures}
+                if figures_changed else {})},
         )
         checks.append({"representative_id": rid, **check.model_dump(mode="json")})
     status = "PASS" if all(item["status"] == "PASS" for item in checks) else "MATERIAL_PROBLEM"
     _freeze(runner, relative, {"status": status, "changes_sha256": hashlib.sha256(
-        json.dumps({"paragraphs": changes, "glossary": final_glossary if glossary_changed else None},
+        json.dumps({"paragraphs": changes, "glossary": final_glossary if glossary_changed else None,
+                    **({"figures": final.draft.figures} if figures_changed else {})},
                    ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest(), "checks": checks})
     return path
@@ -1669,9 +1704,12 @@ def _resolve_local_science_check(runner, module, prior: WriterChapter,
     raise AssertionError("local science check loop exhausted")
 
 
-def _freeze_glossary(runner, module, chapter: WriterChapter) -> Path:
+def _freeze_glossary(
+    runner, module, chapter: WriterChapter, *, revision: int | None = None,
+) -> Path:
     base = Path("public/literature_report/writing_v071")
-    relative = base / f"glossary_after_{module.module_id}.json"
+    revision_suffix = f"_revision_{revision}" if revision is not None else ""
+    relative = base / f"glossary_after_{module.module_id}{revision_suffix}.json"
     path = runner.repo.root / relative
     if path.is_file():
         return path

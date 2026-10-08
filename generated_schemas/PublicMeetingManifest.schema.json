@@ -81,6 +81,39 @@
       "title": "Research Enabled",
       "type": "boolean"
     },
+    "general_search_allowed": {
+      "default": true,
+      "title": "General Search Allowed",
+      "type": "boolean"
+    },
+    "institutional_access_allowed": {
+      "default": false,
+      "title": "Institutional Access Allowed",
+      "type": "boolean"
+    },
+    "academic_search_engine": {
+      "const": "openalex",
+      "default": "openalex",
+      "title": "Academic Search Engine",
+      "type": "string"
+    },
+    "general_search_engine": {
+      "anyOf": [
+        {
+          "enum": [
+            "tavily",
+            "parallel",
+            "disabled"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "General Search Engine"
+    },
     "planning_exploration_enabled": {
       "default": false,
       "title": "Planning Exploration Enabled",

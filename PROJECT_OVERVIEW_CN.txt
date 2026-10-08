@@ -1,7 +1,7 @@
 Project ENSEMBLE：面向普通读者的项目概述
 版本：v0.7.0 历史概述
 更新时间：2026年9月22日
-当前软件发行版：v0.7.3；请以 README.md 与 README_v071.md 为准。
+当前软件发行版：v0.7.5；请以 README.md 与 README_v071.md 为准。
 
 
 一、这是什么？

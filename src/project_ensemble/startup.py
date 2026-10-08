@@ -14,6 +14,7 @@ from typing import Literal, TextIO
 
 from project_ensemble.config import EnsembleConfig
 from project_ensemble.interface_language import ui_label, ui_text
+from project_ensemble.selection_input import parse_number_selection
 from project_ensemble.user_settings import (
     interface_language, report_language_default, save_interface_language,
 )
@@ -53,6 +54,7 @@ from project_ensemble.runtime.terminal_style import (
     GREEN,
     RED,
     YELLOW,
+    format_directory_path,
     rule_width,
     styled,
     supports_color,
@@ -176,7 +178,30 @@ def decode_terminal_input(raw: bytes) -> str:
 
 
 def terminal_input(prompt: str) -> str:
-    """Read one Unicode line with cursor-aware TTY editing when available."""
+    """Read one response, including a bracketed paste or explicit multiline input."""
+    value = _read_terminal_line(prompt)
+    if value != "/paste":
+        return value
+    # Some SSH/terminal combinations do not advertise bracketed paste.  Give
+    # those terminals an unambiguous multiline mode instead of treating each
+    # pasted line as the next menu answer.
+    message = (
+        "Multiline input: paste your text, then enter /end on its own line to submit.\n"
+        if interface_language() == "en"
+        else "多行输入：粘贴内容后，另起一行输入 /end 提交。\n"
+    )
+    sys.stdout.write(message)
+    sys.stdout.flush()
+    lines: list[str] = []
+    while True:
+        line = _read_terminal_line("│ ")
+        if line == "/end":
+            return "\n".join(lines)
+        lines.append(line)
+
+
+def _read_terminal_line(prompt: str) -> str:
+    """Read a single terminal submission without losing queued input bytes."""
     if sys.stdin.isatty() and sys.stdout.isatty():
         while True:
             try:
@@ -264,9 +289,11 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
     Kernel canonical editing can remove the correct UTF-8 bytes while leaving one
     display cell behind for a double-width CJK glyph.  Disabling terminal echo and
     redrawing the whole line after every deletion makes the input buffer and the
-    visible terminal agree.  Committed IME text and ordinary pasted UTF-8 remain
-    supported.  This fallback is intentionally limited; POSIX deployments use
-    readline above for full cursor navigation.
+    visible terminal agree.  Bracketed paste keeps embedded newlines in the
+    same response.  Reading one byte at a time avoids consuming and discarding
+    the next response when an unbracketed paste contains several lines.
+    This fallback is intentionally limited; POSIX deployments use readline
+    above for full cursor navigation.
     """
 
     import termios
@@ -286,6 +313,8 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
     cursor = 0
     pending = bytearray()
     escape_sequence = bytearray()
+    bracketed_paste = False
+    paste_cr = False
     try:
         columns = max(1, os.get_terminal_size(fd).columns)
     except OSError:
@@ -301,8 +330,11 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
         sequence = "\r\x1b[2K"
         for _ in range(occupied_rows):
             sequence += "\x1b[1A\r\x1b[2K"
-        visible = prompt + "".join(characters)
-        suffix = "".join(characters[cursor:])
+        # Render an embedded newline as one visible cell.  The returned value
+        # still contains the actual newline, while cursor/redraw math stays
+        # well-defined for a single terminal input row.
+        visible = prompt + "".join(characters).replace("\n", "↵")
+        suffix = "".join(characters[cursor:]).replace("\n", "↵")
         # The fallback is used primarily for short prompts.  For a wrapped
         # line, clear and repaint the content correctly; placing the cursor
         # within a wrapped suffix is handled conservatively at its nearest
@@ -356,12 +388,14 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
         cursor = len(characters)
         redraw()
 
-    sys.stdout.write(prompt)
+    sys.stdout.write("\x1b[?2004h" + prompt)
     sys.stdout.flush()
     termios.tcsetattr(fd, termios.TCSANOW, edited)
     try:
         while True:
-            chunk = os.read(fd, 64)
+            # Never over-read past a submitted newline: a pasted next line
+            # must remain available to the next prompt or /paste reader.
+            chunk = os.read(fd, 1)
             if not chunk:
                 echo_pending(final=True)
                 if not characters:
@@ -374,6 +408,18 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
                     if len(escape_sequence) > 2 and 0x40 <= byte <= 0x7E:
                         sequence = bytes(escape_sequence)
                         escape_sequence.clear()
+                        if sequence == b"\x1b[200~":
+                            bracketed_paste = True
+                            paste_cr = False
+                            continue
+                        if sequence == b"\x1b[201~":
+                            bracketed_paste = False
+                            echo_pending(final=True)
+                            continue
+                        if bracketed_paste:
+                            # Do not interpret cursor/control keys embedded
+                            # in clipboard text as editing commands.
+                            continue
                         echo_pending(final=True)
                         if sequence in {b"\x1b[D", b"\x1bOD"}:
                             cursor = max(0, cursor - 1)
@@ -395,6 +441,17 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
                 if byte == 0x1B:
                     echo_pending(final=True)
                     escape_sequence.append(byte)
+                    continue
+                if bracketed_paste:
+                    if byte in (0x0A, 0x0D):
+                        if byte == 0x0A and paste_cr:
+                            paste_cr = False
+                            continue
+                        paste_cr = byte == 0x0D
+                        pending.append(0x0A)
+                    elif byte == 0x09 or byte >= 0x20:
+                        paste_cr = False
+                        pending.append(byte)
                     continue
                 if byte in (0x7F, 0x08):
                     echo_pending(final=True)
@@ -445,9 +502,13 @@ def _interactive_terminal_input_raw(prompt: str) -> str:
                     raise KeyboardInterrupt
                 if byte < 0x20:
                     continue
+                paste_cr = False
                 pending.append(byte)
-                echo_pending()
+                if not bracketed_paste:
+                    echo_pending()
     finally:
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, original)
     return unicodedata.normalize("NFC", "".join(characters))
 
@@ -491,10 +552,14 @@ class StartupSelection:
     representative_reasoning_effort: ReasoningEffort = ReasoningEffort.DEFAULT
     chair_reasoning_effort: ReasoningEffort = ReasoningEffort.DEFAULT
     research_enabled: bool = False
+    general_search_allowed: bool = True
+    institutional_access_allowed: bool = False
+    academic_search_engine: Literal["openalex"] = "openalex"
+    general_search_engine: Literal["tavily", "parallel", "disabled"] | None = None
     research_model: ProviderModel | None = None
     research_reasoning_effort: ReasoningEffort | None = None
     openalex_max_results_per_query: int | None = None
-    openalex_quota_policy: Literal["wait", "tavily"] = "wait"
+    openalex_quota_policy: Literal["wait", "tavily", "parallel"] = "wait"
     research_max_concurrent_claim_groups: int | None = None
     maximum_parallelism: bool = False
     model_concurrency_limit: int | None = None
@@ -537,6 +602,21 @@ class StartupSelection:
     prompt_development: dict | None = None
 
 
+def _parallel_model_concurrency_default(
+    config: EnsembleConfig,
+    *,
+    research_enabled: bool,
+    research_max_concurrent_claim_groups: int | None,
+) -> int:
+    """Align enabled model-level parallelism with the Research Desk task cap."""
+
+    if not research_enabled:
+        return 4
+    if research_max_concurrent_claim_groups is not None:
+        return research_max_concurrent_claim_groups
+    return config.research.max_concurrent_claim_groups
+
+
 def natural_meeting_title(task_description: str, *, max_characters: int = 56) -> str:
     """Derive a stable human-readable title without another provider call."""
 
@@ -571,7 +651,12 @@ def config_with_providers_enabled(
     return config.model_copy(update={"providers": providers})
 
 
-def discover_models(config: EnsembleConfig, provider_ids: list[str]) -> list[ModelDescriptor]:
+def discover_models(
+    config: EnsembleConfig,
+    provider_ids: list[str],
+    *,
+    include_hidden: bool = False,
+) -> list[ModelDescriptor]:
     unknown = sorted(set(provider_ids) - set(config.providers))
     if unknown:
         raise PermanentProviderError(f"selected providers are unavailable or unconfigured: {', '.join(unknown)}")
@@ -615,6 +700,11 @@ def discover_models(config: EnsembleConfig, provider_ids: list[str]) -> list[Mod
                     f"none of the configured selectable_models for {provider_id} "
                     "were returned by live model discovery"
                 )
+        if not include_hidden:
+            from project_ensemble.user_settings import hidden_model_ids
+
+            hidden = hidden_model_ids(provider_id)
+            usable = [model for model in usable if model.model_id not in hidden]
         models.extend(usable)
     if not models:
         raise PermanentProviderError("the selected providers returned no available models")
@@ -659,11 +749,13 @@ class TerminalWizard:
         self._print()
 
     def _dialogue_human_turn(self, text: str) -> None:
-        """Show the complete committed input, even when terminal paste echo is clipped."""
-        role = "You · sent" if self.language == "en" else "你 · 已发送"
+        """Confirm submission without echoing the Human's text a second time."""
+        line_count = text.count("\n") + 1
+        role = "Me · sent" if self.language == "en" else "我 · 已发送"
+        if line_count > 1:
+            role += f" ({line_count} lines)" if self.language == "en" else f"（{line_count} 行）"
         self._print()
         self._print(styled(f"  ── {role} ──", GREEN, enabled=self.color))
-        print(text, file=self.output)
         self._print()
 
     def _section(self, title: str) -> None:
@@ -846,13 +938,16 @@ class TerminalWizard:
                 (
                     entry.path,
                     f"{entry.meeting_id} · {entry.title} · "
-                    f"{'已完成' if meeting_is_complete(entry.path) else '进行中'} · {entry.path}",
+                    f"{'已完成' if meeting_is_complete(entry.path) else '进行中'} · "
+                    f"{format_directory_path(entry.path, color=self.color)}",
                 )
                 for entry in entries
             ]
             options.append(("manual", "手动输入源会议 ID、标题或目录"))
             choice = self._choose_one("选择需要接续的源会议", options)
             if choice != "manual":
+                label = "源会议完整目录：" if self.language == "zh" else "Source meeting directory: "
+                self._print(label + format_directory_path(choice, compact=False, color=self.color))
                 return choice
         while True:
             candidate = self.input("输入源会议 ID、标题或目录: ").strip()
@@ -951,10 +1046,10 @@ class TerminalWizard:
 
         turns: list[dict[str, str]] = []
         self._print("  写下研究想法即可，不必一次成稿。输入 /draft 查看候选命题；/back 改为直接输入。")
-        self._print("  发送后会完整回显你的发言，方便核对长段或多行粘贴。")
+        self._print("  可直接粘贴多行；若终端逐行提交，先输入 /paste，粘贴后另起一行输入 /end。发送后只显示确认，不重复发言。")
         self._print()
         while True:
-            message = unicodedata.normalize("NFC", self.input("你: ")).strip()
+            message = unicodedata.normalize("NFC", self.input("我: ")).strip()
             if message.lower() in {"/back", "/cancel"}:
                 return None, None
             if not message:
@@ -1066,7 +1161,7 @@ class TerminalWizard:
             else "  这一步只设计研究任务，不开始文献检索或撰写报告。"
         )
         self._print("  每次可只说一部分想法；/draft 可随时生成当前最佳版本，/back 改为直接输入。")
-        self._print("  发送后会完整回显你的发言，方便核对长段或多行粘贴。")
+        self._print("  可直接粘贴多行；若终端逐行提交，先输入 /paste，粘贴后另起一行输入 /end。发送后只显示确认，不重复发言。")
         provider_id, model_id = chair_model
         try:
             provider = config.providers[provider_id]
@@ -1082,21 +1177,22 @@ class TerminalWizard:
             return None, None
 
         turns: list[dict[str, str]] = []
+        source_prefix = (
+            "来源会议材料（只供设计新研究题目，不代表本次证据已核实）：\n"
+            + source_context + "\n\n"
+            if source_context else ""
+        )
 
         def context() -> str:
             transcript = "\n".join(
                 f"{'人类' if turn['role'] == 'human' else '主席'}：{turn['text']}"
                 for turn in turns
             )
-            if source_context:
-                transcript = (
-                    "来源会议概览（只供设计新研究题目，不代表本次证据已核实）：\n"
-                    + source_context + "\n\n" + transcript
-                )
-            if len(transcript) <= 64000:
-                return transcript
+            if len(source_prefix) + len(transcript) <= 64000:
+                return source_prefix + transcript
             # Preserve human decisions before retaining recent discussion. The
             # confirmed final prompt is displayed in full before creation.
+            # The source meeting's original prompt is never truncated here.
             human_text = "\n".join(
                 f"人类：{turn['text']}" for turn in turns if turn["role"] == "human"
             )
@@ -1106,11 +1202,11 @@ class TerminalWizard:
                 f"{'人类' if turn['role'] == 'human' else '主席'}：{turn['text']}"
                 for turn in turns[-12:]
             )[-16000:]
-            return (source_context + "\n\n" if source_context else "") + human_text + "\n[最近对话，可能与上文重复]\n" + recent
+            return source_prefix + human_text + "\n[最近对话，可能与上文重复]\n" + recent
 
         self._print()
         while True:
-            message = unicodedata.normalize("NFC", self.input("你: ")).strip()
+            message = unicodedata.normalize("NFC", self.input("我: ")).strip()
             if message.lower() in {"/back", "/cancel"}:
                 return None, None
             if not message:
@@ -1204,7 +1300,7 @@ class TerminalWizard:
         for index, (value, description) in enumerate(options, start=1):
             self._option(index, value, description)
         while True:
-            prompt = "选择一个或多个编号（逗号分隔）"
+            prompt = "选择一个或多个编号（空格/逗号分隔，1-3 表示连续编号）"
             if blank_means_all:
                 prompt += "，直接回车选择全部"
             elif blank_means_none:
@@ -1218,13 +1314,10 @@ class TerminalWizard:
                 return []
             if default_values and not raw:
                 return list(default_values)
-            try:
-                indexes = [int(x.strip()) for x in raw.split(",") if x.strip()]
-            except ValueError:
-                indexes = []
-            if indexes and len(indexes) == len(set(indexes)) and all(1 <= x <= len(options) for x in indexes):
+            indexes = parse_number_selection(raw, len(options))
+            if indexes and len(indexes) == len(set(indexes)):
                 return [options[x - 1][0] for x in indexes]
-            self._print(styled("请输入不重复的有效编号，例如 1,3。", YELLOW, enabled=self.color))
+            self._print(styled("请输入不重复的有效编号，例如 1，3-5。", YELLOW, enabled=self.color))
 
     def collect(self, *args, **kwargs) -> StartupSelection:
         """Offer `b` at every setup prompt without creating a partial meeting.
@@ -1287,20 +1380,29 @@ class TerminalWizard:
 
     @staticmethod
     def _source_meeting_topic_context(parent_meeting_path: str | None) -> str | None:
-        """A small orientation note for a successor's pre-meeting topic dialogue."""
+        """Give a successor's preparatory Chair the full original source prompt."""
         if not parent_meeting_path:
             return None
         root = Path(parent_meeting_path)
         parts: list[str] = []
-        task_path = root / "public/task.json"
-        if task_path.is_file():
+        original_prompt_path = root / "original_prompt.txt"
+        if original_prompt_path.is_file():
             try:
-                task = json.loads(task_path.read_text(encoding="utf-8"))
-                description = str(task.get("description") or "").strip()
-                if description:
-                    parts.append("源会议原任务：" + description[:2500])
-            except (OSError, ValueError, TypeError):
+                original_prompt = original_prompt_path.read_text(encoding="utf-8")
+                if original_prompt.strip():
+                    parts.append("源会议完整原始提示词（原文，不截断）：\n" + original_prompt)
+            except (OSError, UnicodeError):
                 pass
+        if not parts:
+            task_path = root / "public/task.json"
+            if task_path.is_file():
+                try:
+                    task = json.loads(task_path.read_text(encoding="utf-8"))
+                    description = str(task.get("description") or "")
+                    if description.strip():
+                        parts.append("源会议完整原始提示词（由任务记录恢复，不截断）：\n" + description)
+                except (OSError, ValueError, TypeError):
+                    pass
         for relative in (
             "public/final/literature_review_report.md",
             "public/final/scholarly_rendering/scholarly_review.md",
@@ -1464,8 +1566,12 @@ class TerminalWizard:
         chair_effort = ReasoningEffort.DEFAULT
         research_model: ProviderModel | None = None
         research_effort: ReasoningEffort | None = None
+        general_search_allowed = True
+        institutional_access_allowed = False
+        academic_search_engine = "openalex"
+        general_search_engine = None
         openalex_max_results_per_query: int | None = None
-        openalex_quota_policy: Literal["wait", "tavily"] = "wait"
+        openalex_quota_policy: Literal["wait", "tavily", "parallel"] = "wait"
         research_max_concurrent_claim_groups: int | None = None
         maximum_parallelism = fast_report
         report_palette = DEFAULT_PALETTE
@@ -1631,12 +1737,9 @@ class TerminalWizard:
             for index, value in enumerate(science, start=1):
                 self._print(f"  {index}. {value}")
             while True:
-                raw_order = self.input("按顺序输入全部编号（逗号分隔）: ").strip()
-                try:
-                    order = [int(value.strip()) for value in raw_order.split(",")]
-                except ValueError:
-                    order = []
-                if sorted(order) == list(range(1, len(science) + 1)):
+                raw_order = self.input("按顺序输入全部编号（空格/逗号分隔，1-3 表示连续编号）: ").strip()
+                order = parse_number_selection(raw_order, len(science))
+                if order is not None and sorted(order) == list(range(1, len(science) + 1)):
                     rendering_science_order = tuple(science[index - 1] for index in order)
                     break
                 self._print(styled("必须把每个科学核校模型恰好排列一次。", YELLOW, enabled=self.color))
@@ -1753,6 +1856,10 @@ class TerminalWizard:
             email_prompt = "\n10/10 输入人工介入通知邮箱（可留空）: "
 
         if research_enabled:
+            academic_search_engine = self._choose_academic_search_engine()
+            institutional_access_allowed = self._institutional_access_allowed
+            general_search_engine = self._choose_general_search_engine(config)
+            general_search_allowed = general_search_engine != "disabled"
             self._section("OpenAlex 每类检索返回的文献候选数")
             self._print("  每条事实主张会分别检索支持、反证、适用范围和替代解释。")
             self._print("  建议值 12；允许 1–50。直接回车采用建议值。")
@@ -1768,21 +1875,27 @@ class TerminalWizard:
 
             self._section(ui_label("OpenAlex 返回 HTTP 429 时", "When OpenAlex returns HTTP 429", self.language))
             self._print(ui_label("   1. 当日额度耗尽时询问是否使用备用搜索；未知 429 短时退避重试（默认）", "   1. Ask whether to use backup search on daily exhaustion; retry unknown 429s (default)", self.language))
-            if config.research.tavily.enabled:
-                self._print(ui_label("   2. 预先授权限流时用 Tavily 补读；稍后尝试 OpenAlex 补检", "   2. Pre-authorize Tavily reading during limits, then retry OpenAlex", self.language))
+            if general_search_allowed and getattr(config.research, general_search_engine).enabled:
+                self._print(ui_label(f"   2. 预授权限流时用 {general_search_engine.title()} 补检；稍后尝试 OpenAlex 补检", f"   2. Pre-authorize {general_search_engine.title()} search during limits, then retry OpenAlex", self.language))
                 while True:
                     answer = self.input(ui_label("选择 1–2；回车默认等待人类裁定: ", "Choose 1–2; Enter asks for a Human decision: ", self.language)).strip()
                     if answer in {"", "1", "2"}:
-                        openalex_quota_policy = "tavily" if answer == "2" else "wait"
+                        openalex_quota_policy = general_search_engine if answer == "2" else "wait"
                         break
                     self._print(ui_label("请输入 1 或 2，或直接回车采用默认值。", "Enter 1 or 2, or press Enter for the default.", self.language))
                 self._print(ui_label(
-                    "  OpenAlex 连接故障经重试仍未恢复时，Tavily 自动接手；网页与法规等非学术检索仍由 Tavily 正常执行。",
-                    "  If OpenAlex remains unreachable after retries, Tavily takes over; Tavily still handles web and regulatory searches.",
+                    "  学术检索故障不自动启用付费网页搜索，只有上述明确预授权时才回退；通用问题可使用所选引擎。",
+                    "  Academic failures do not automatically trigger paid web search; fallback requires explicit authorization above. General queries use the selected engine.",
                     self.language,
                 ))
             else:
-                self._print(ui_label("  Tavily 未启用，因此只能等待 OpenAlex 重置。", "  Tavily is disabled, so the meeting must wait for OpenAlex to reset.", self.language))
+                self._print(ui_label(
+                    "  本会议禁止通用搜索；不会使用 Tavily／Parallel 回退，额度耗尽时保留进度等待 OpenAlex 恢复。"
+                    if not general_search_allowed else "  通用搜索未配置，因此只能等待 OpenAlex 重置。",
+                    "  General search is prohibited in this meeting; no Tavily/Parallel fallback. Preserve progress and wait for OpenAlex."
+                    if not general_search_allowed else "  General search is disabled, so the meeting must wait for OpenAlex to reset.",
+                    self.language,
+                ))
 
         if research_enabled and meeting_type == MeetingType.DELIBERATION:
             default_parallel = config.research.max_concurrent_claim_groups
@@ -1812,10 +1925,37 @@ class TerminalWizard:
                 )
             )
         if meeting_type != MeetingType.RESEARCH and not fast_report:
+            parallel_model_default = _parallel_model_concurrency_default(
+                config,
+                research_enabled=research_enabled,
+                research_max_concurrent_claim_groups=research_max_concurrent_claim_groups,
+            )
+            if research_enabled:
+                parallel_title = ui_label(
+                    f"模型独立任务并行度（默认与 Research Desk 一致：每模型 {parallel_model_default} 路）",
+                    f"Independent model-task parallelism (default matches Research Desk: {parallel_model_default} calls per model)",
+                    self.language,
+                )
+                parallel_enabled = ui_label(
+                    f"开启；相关模型默认最多同时调用 {parallel_model_default} 次，与 Research Desk 独立任务数一致；可能增加限流和缓存未命中",
+                    f"On; related models default to {parallel_model_default} simultaneous calls, matching Research Desk task parallelism; rate limits and cache misses may increase",
+                    self.language,
+                )
+            else:
+                parallel_title = ui_label(
+                    "模型独立任务并行度（Research Desk 未启用；默认每模型最多 4 路）",
+                    "Independent model-task parallelism (Research Desk disabled; default up to 4 calls per model)",
+                    self.language,
+                )
+                parallel_enabled = ui_label(
+                    "开启；相关模型默认最多同时调用 4 次；可能增加限流和缓存未命中",
+                    "On; related models default to up to four simultaneous calls; rate limits and cache misses may increase",
+                    self.language,
+                )
             maximum_parallelism = self._choose_one(
-                "模型独立任务并行度（默认每个基础模型最多 4 路）",
+                parallel_title,
                 [
-                    ("yes", "开启；每个代表模型最多同时调用 4 次，速度更快但缓存未命中可能增加"),
+                    ("yes", parallel_enabled),
                     ("no", "关闭；使用当前模型配置或保守并发上限"),
                 ],
             ) == "yes"
@@ -2031,23 +2171,51 @@ class TerminalWizard:
             ))
 
         self._section("模型同时在途调用上限")
-        self._print(
-            "  这是每个基础模型可同时处理的请求数，不是 Research Desk 的独立问题组数。"
-            if self.language == "zh" else
-            "  This caps simultaneous calls per base model; it is separate from Research Desk task groups."
+        parallel_model_default = _parallel_model_concurrency_default(
+            config,
+            research_enabled=research_enabled,
+            research_max_concurrent_claim_groups=research_max_concurrent_claim_groups,
         )
-        self._print(
-            "  直接回车沿用当前配置（简易文献调研通常每模型 4 路）；输入 1–16 则统一覆盖本次所选模型。"
-            if self.language == "zh" else
-            "  Enter keeps configured defaults (usually 4 per model for fast research); 1–16 overrides all selected models."
-        )
+        if maximum_parallelism:
+            if research_enabled:
+                self._print(ui_label(
+                    f"  这是单个基础模型可同时处理的请求数；开启并行时，参与并行任务的模型默认与 Research Desk 的独立任务上限一致（{parallel_model_default} 路）。",
+                    f"  This is the simultaneous-call cap for one base model. With parallelism enabled, participating models default to the Research Desk task cap ({parallel_model_default}).",
+                    self.language,
+                ))
+            else:
+                self._print(ui_label(
+                    "  这是单个基础模型可同时处理的请求数；Research Desk 未启用时，并行模型默认最多 4 路。",
+                    "  This is the simultaneous-call cap for one base model; without Research Desk, the parallel default is four calls per model.",
+                    self.language,
+                ))
+        else:
+            self._print(ui_label(
+                "  这是单个基础模型可同时处理的请求数；它与 Research Desk 的独立问题组数是不同参数。",
+                "  This is the simultaneous-call cap for one base model; it is distinct from Research Desk task parallelism.",
+                self.language,
+            ))
+        self._print(ui_label(
+            "  直接回车沿用上述默认值；输入 1–16 则把本次所选模型的上限统一改为该值。"
+            if maximum_parallelism else
+            "  直接回车沿用各模型当前配置；输入 1–16 则把本次所选模型的上限统一改为该值。",
+            "  Press Enter to keep the default above; enter 1–16 to apply a uniform cap to the selected models."
+            if maximum_parallelism else
+            "  Press Enter to keep each model's configured cap; enter 1–16 to apply a uniform cap to the selected models.",
+            self.language,
+        ))
         model_concurrency_limit: int | None = None
+        concurrency_prompt = (
+            f"每个模型最多同时调用多少次 [默认 {parallel_model_default}]: "
+            if maximum_parallelism and self.language == "zh" else
+            "每个模型最多同时调用多少次 [沿用当前配置]: "
+            if self.language == "zh" else
+            f"Maximum simultaneous calls per model [default {parallel_model_default}]: "
+            if maximum_parallelism else
+            "Maximum simultaneous calls per model [keep current settings]: "
+        )
         while True:
-            raw_limit = self.input(
-                "每个模型最多同时调用多少次 [沿用当前配置]: "
-                if self.language == "zh" else
-                "Maximum simultaneous calls per model [keep current settings]: "
-            ).strip()
+            raw_limit = self.input(concurrency_prompt).strip()
             if not raw_limit:
                 break
             if raw_limit.isascii() and raw_limit.isdecimal() and 1 <= int(raw_limit) <= 16:
@@ -2070,6 +2238,10 @@ class TerminalWizard:
             representative_reasoning_effort=representative_effort,
             chair_reasoning_effort=chair_effort,
             research_enabled=research_enabled,
+            general_search_allowed=general_search_allowed,
+            institutional_access_allowed=institutional_access_allowed,
+            academic_search_engine=academic_search_engine,
+            general_search_engine=general_search_engine,
             research_model=research_model,
             research_reasoning_effort=research_effort,
             openalex_max_results_per_query=openalex_max_results_per_query,
@@ -2175,6 +2347,22 @@ class TerminalWizard:
                 f"  每模型同时在途调用上限（输入控制参数）: {selection.model_concurrency_limit} 路",
                 f"  Simultaneous-call cap per model (input control): {selection.model_concurrency_limit}",
             )
+        elif selection.maximum_parallelism:
+            parallel_model_default = _parallel_model_concurrency_default(
+                config,
+                research_enabled=selection.research_enabled,
+                research_max_concurrent_claim_groups=selection.research_max_concurrent_claim_groups,
+            )
+            if selection.research_enabled:
+                summary(
+                    f"  并行模型默认调用上限: 每模型 {parallel_model_default} 路，与 Research Desk 独立任务并行度一致",
+                    f"  Default parallel model-call cap: {parallel_model_default} per model, matching Research Desk task parallelism",
+                )
+            else:
+                summary(
+                    f"  并行模型默认调用上限: 每模型 {parallel_model_default} 路（Research Desk 未启用）",
+                    f"  Default parallel model-call cap: {parallel_model_default} per model (Research Desk disabled)",
+                )
         if selection.meeting_type != MeetingType.RESEARCH:
             if selection.meeting_type == MeetingType.SCHOLARLY_RENDERING:
                 reviewer_union = set(selection.rendering_science_models) | set(
@@ -2200,14 +2388,10 @@ class TerminalWizard:
                     summary("  模块拆分: 已跳过多人协作；由学术主笔独立完成",
                             "  Module split: multi-model collaboration skipped; Writer plans independently")
             if not fast_report:
-                if selection.model_concurrency_limit is not None:
-                    summary(
-                        f"  独立代表提交并行上限: 每模型 {selection.model_concurrency_limit} 路同时在途调用",
-                        f"  Independent submission cap: {selection.model_concurrency_limit} simultaneous calls per model",
-                    )
-                else:
-                    summary("  独立代表提交最大并行: " + ("开启 · 每模型最多 4 次在途调用" if selection.maximum_parallelism else "关闭"),
-                            "  Maximum independent submission parallelism: " + ("on · up to 4 in-flight calls per model" if selection.maximum_parallelism else "off"))
+                summary(
+                    "  独立代表提交并行: " + ("开启" if selection.maximum_parallelism else "关闭"),
+                    "  Independent representative submissions: " + ("on" if selection.maximum_parallelism else "off"),
+                )
             if selection.meeting_type == MeetingType.DELIBERATION and not fast_report:
                 relaxed = selection.decision_rigor == DecisionRigor.RELAXED
                 summary("  决策严谨度: " + ("宽松 · 原 3/4 高门槛改为过半" if relaxed else "严格 · 沿用原门槛"),
@@ -2220,13 +2404,22 @@ class TerminalWizard:
                     f"  Technician: enabled · {selection.technician_model[0]}:{selection.technician_model[1]} · failure excerpts may reach this provider; cannot edit ENSEMBLE code")
             summary(f"  OpenAlex 每类查询候选数上限: {selection.openalex_max_results_per_query} 条", f"  OpenAlex candidate limit per query type: {selection.openalex_max_results_per_query}")
             summary(
-                f"  OpenAlex HTTP 429 策略: {'确认当日耗尽时请求人类裁定；未知限流重试' if selection.openalex_quota_policy == 'wait' else '已预授权 Tavily 补读，稍后尝试 OpenAlex 补检'}",
-                f"  OpenAlex HTTP 429 policy: {'ask Human on confirmed daily exhaustion; retry unknown limits' if selection.openalex_quota_policy == 'wait' else 'Tavily reading pre-authorized, then OpenAlex recheck'}",
+                f"  OpenAlex HTTP 429 策略: {'确认当日耗尽时请求人类裁定；未知限流重试' if selection.openalex_quota_policy == 'wait' else '已预授权 ' + selection.openalex_quota_policy.title() + ' 补检，稍后尝试 OpenAlex 补检'}",
+                f"  OpenAlex HTTP 429 policy: {'ask Human on confirmed daily exhaustion; retry unknown limits' if selection.openalex_quota_policy == 'wait' else selection.openalex_quota_policy.title() + ' search pre-authorized, then OpenAlex recheck'}",
             )
             if selection.research_max_concurrent_claim_groups is not None:
                 summary(f"  Research Desk 独立任务最大并行度: {selection.research_max_concurrent_claim_groups} 组", f"  Research Desk maximum concurrent independent tasks: {selection.research_max_concurrent_claim_groups}")
         else:
             summary("  Research Desk: 未启用", "  Research Desk: disabled")
+        if selection.research_enabled:
+            summary(
+                "  学术搜索: OpenAlex；本会议通用搜索: " + ((selection.general_search_engine or "tavily").title() if selection.general_search_allowed else "禁用；不调用 Tavily／Parallel，含付费 Extract"),
+                "  Academic search: OpenAlex; general search for this meeting: " + ((selection.general_search_engine or "tavily").title() if selection.general_search_allowed else "disabled; no Tavily/Parallel search, fallback or paid Extract"),
+            )
+            summary(
+                "  机构订阅原文访问: " + ("已授权；订阅原件私有保存" if selection.institutional_access_allowed else "未授权；仅尝试公开原文"),
+                "  Institutional source access: " + ("authorized; subscription originals stay private" if selection.institutional_access_allowed else "disabled; public originals only"),
+            )
         summary(f"  通知邮箱: {selection.escalation_email or '未配置'}", f"  Notification email: {selection.escalation_email or 'not configured'}")
         self._print(styled("└" + "─" * (self.width - 1), CYAN, enabled=self.color))
         confirmed = self.input("创建会议工作区？[y/N]: ").strip().lower()
@@ -2238,6 +2431,62 @@ class TerminalWizard:
     def _parse_provider_model(value: str) -> ProviderModel:
         provider, model = value.split(":", 1)
         return provider, model
+
+    def _choose_academic_search_engine(self) -> str:
+        self._section(ui_label("学术搜索引擎", "Academic search engine", self.language))
+        self._print(ui_label("  1. OpenAlex；原文仅尝试公开获取（默认）", "  1. OpenAlex; publicly accessible originals only (default)", self.language))
+        self._print(ui_label("  2. OpenAlex；同时授权利用运行机器现有的机构订阅权限读取原文", "  2. OpenAlex; also authorize direct original reading using this machine's existing institutional access", self.language))
+        self._print(ui_label("  不配置登录或代理、不绕过认证；订阅原件私有保存，不默认导出。接续时保留，Ctrl+R 第 10 项可修改。", "  No login/proxy setup or authentication bypass. Subscription originals stay private and are not exported by default. Retained on resume; editable with Ctrl+R option 10.", self.language))
+        while True:
+            answer = self.input(ui_label("学术搜索引擎（1 公开原文／2 允许机构访问；回车默认 1）: ", "Academic search engine (1 public originals / 2 allow institutional access; Enter selects 1): ", self.language)).strip()
+            if answer in {"", "1", "2"}:
+                self._institutional_access_allowed = answer == "2"
+                return "openalex"
+            self._print(ui_label("请输入 1、2 或直接回车。", "Enter 1, 2 or press Enter.", self.language))
+
+    def _choose_general_search_engine(self, config: EnsembleConfig) -> str:
+        self._section(ui_label("本会议通用搜索引擎", "General search engine for this meeting", self.language))
+        self._print(ui_label("  1. Tavily（显式 basic；仅用于明确的通用搜索或已授权回退）", "  1. Tavily (explicit basic; general queries or authorized fallback only)", self.language))
+        self._print(ui_label("  2. 禁用（默认；保留学术检索、本地资料和原文直接读取）", "  2. Disabled (default; keep academic search, local sources and direct reading)", self.language))
+        self._print(ui_label("  3. Parallel（fast／turbo，每次最多 10 条；不自动调用付费 Extract）", "  3. Parallel (fast/turbo, at most 10 results; no automatic paid Extract)", self.language))
+        self._print(ui_label("  4. 查看／检测／修改搜索 API 配置，然后返回本次会议选择", "  4. Inspect / test / edit search API settings, then return to this meeting's choice", self.language))
+        self._print(ui_label("  仅影响本会议；接续时沿用，运行中可通过 Ctrl+R 第 9 项修改。", "  Meeting-local; retained on resume and editable with Ctrl+R, option 9.", self.language))
+        while True:
+            answer = self.input(ui_label("通用网页搜索（1 Tavily／2 禁用／3 Parallel／4 API 设置；回车默认禁用）: ", "General web search (1 Tavily / 2 disabled / 3 Parallel / 4 API settings; Enter disables): ", self.language)).strip()
+            if answer == "4":
+                from project_ensemble.search_backend_settings import configure_search_interactively, effective_search_config
+                configure_search_interactively(self, seed_path=config.source_path)
+                config.research = effective_search_config(config.source_path).research
+                self._print(ui_label("已返回本会议通用搜索选择；API 配置不会自动授权会议调用。", "Back to this meeting's general-search choice; API settings do not authorize meeting calls automatically.", self.language))
+                continue
+            if answer not in {"", "1", "2", "3"}:
+                self._print(ui_label("请输入 1、2、3 或 4。", "Enter 1, 2, 3 or 4.", self.language))
+                continue
+            engine = {"1": "tavily", "3": "parallel"}.get(answer, "disabled")
+            if engine != "disabled" and not getattr(config.research, engine).enabled:
+                self._print(ui_label(f"  {engine.title()} 尚未配置；请先在设置 → 联网检索中配置，或选择禁用。", f"  {engine.title()} is not configured; configure it in Settings → Search or disable general search.", self.language))
+                continue
+            return engine
+
+    def _choose_general_search(self, config: EnsembleConfig) -> bool:
+        self._section(ui_label("本会议是否允许通用网页搜索", "Allow general web search in this meeting?", self.language))
+        self._print(ui_label("  1. 允许；使用已配置的通用搜索后端（Tavily）", "  1. Allow configured general-search backends (Tavily)", self.language))
+        self._print(ui_label("  2. 禁止；只用学术检索与本地资料，不调用 Tavily（含回退／Extract）", "  2. Prohibit; academic search and local sources only, no Tavily (including fallback/Extract)", self.language))
+        self._print(ui_label(
+            "  仅影响本会议，并在接续时保留；不修改其他会议或全局供应商设置。学术原文下载与直接读取不受影响。",
+            "  Meeting-local and retained on resume; other meetings and global settings are unchanged. Academic source downloads/direct reading remain available.",
+            self.language,
+        ))
+        if not config.research.tavily.enabled:
+            self._print(ui_label("  当前未配置 Tavily；选择允许也不会自动启用或配置它。", "  Tavily is not configured; allowing it does not enable/configure a backend automatically.", self.language))
+        while True:
+            answer = self.input(ui_label(
+                "通用网页搜索（1 允许／2 禁止；回车默认允许）: ",
+                "General web search (1 allow / 2 prohibit; Enter allows): ", self.language,
+            )).strip()
+            if answer in {"", "1", "2"}:
+                return answer != "2"
+            self._print(ui_label("请输入 1 或 2。", "Enter 1 or 2.", self.language))
 
     @staticmethod
     def _provider_description(provider_id: str, config: EnsembleConfig) -> str:
@@ -2528,8 +2777,18 @@ def validate_noninteractive_selection(selection: StartupSelection, config: Ensem
             1 <= selection.openalex_max_results_per_query <= 50
         ):
             raise ValueError("OpenAlex results per query must be between 1 and 50")
-        if selection.openalex_quota_policy == "tavily" and not config.research.tavily.enabled:
-            raise ValueError("Tavily quota fallback requires the Tavily research backend")
+        if selection.openalex_quota_policy in {"tavily", "parallel"} and not selection.general_search_allowed:
+            raise ValueError("本会议禁止通用搜索，不能预授权 Tavily 额度回退")
+        if selection.general_search_engine not in {None, "disabled", "tavily", "parallel"}:
+            raise ValueError("unknown general search engine")
+        if selection.academic_search_engine != "openalex":
+            raise ValueError("academic search currently supports OpenAlex only")
+        if selection.general_search_engine in {"tavily", "parallel"} and not getattr(config.research, selection.general_search_engine).enabled:
+            raise ValueError("Selected general search engine must be configured in Settings first")
+        if selection.openalex_quota_policy in {"tavily", "parallel"}:
+            selected_engine = selection.general_search_engine or "tavily"
+            if selected_engine != selection.openalex_quota_policy or not getattr(config.research, selected_engine).enabled:
+                raise ValueError("Quota fallback requires the selected, configured general search backend")
         if (selection.research_max_concurrent_claim_groups is not None
                 and selection.research_max_concurrent_claim_groups < 1):
             raise ValueError("Research Desk independent-task parallelism must be positive")
@@ -2672,9 +2931,24 @@ def start_meeting(
         if selection.maximum_parallelism and (
             selection.deliverable_type == DeliverableType.LITERATURE_REVIEW
             or (provider_id, model_id) in reviewer_models
+            or (
+                selection.research_enabled
+                and selection.research_model == (provider_id, model_id)
+            )
         ):
-            concurrency_limits[(provider_id, model_id)] = 4
-            concurrency_sources[(provider_id, model_id)] = "HUMAN_MAX_PARALLEL_4"
+            parallel_model_default = _parallel_model_concurrency_default(
+                config,
+                research_enabled=selection.research_enabled,
+                research_max_concurrent_claim_groups=(
+                    selection.research_max_concurrent_claim_groups
+                ),
+            )
+            concurrency_limits[(provider_id, model_id)] = parallel_model_default
+            concurrency_sources[(provider_id, model_id)] = (
+                "PARALLELISM_MATCHED_TO_RESEARCH_DESK"
+                if selection.research_enabled
+                else "HUMAN_MAX_PARALLEL_4"
+            )
             continue
         configured = config.providers[provider_id].configured_concurrency_limit(model_id)
         reported = (
@@ -2704,6 +2978,10 @@ def start_meeting(
         representative_reasoning_effective=representative_effective,
         chair_reasoning_effort=chair_effective,
         research_enabled=selection.research_enabled,
+        general_search_allowed=selection.general_search_allowed,
+        institutional_access_allowed=selection.institutional_access_allowed,
+        academic_search_engine=selection.academic_search_engine,
+        general_search_engine=selection.general_search_engine,
         research_model=selection.research_model,
         research_reasoning_effort=research_effective,
         openalex_max_results_per_query=(

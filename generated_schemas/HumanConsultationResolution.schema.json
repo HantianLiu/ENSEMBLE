@@ -89,7 +89,8 @@
       "default": "HUMAN",
       "enum": [
         "HUMAN",
-        "DELEGATED_CHAIR"
+        "DELEGATED_CHAIR",
+        "DELEGATED_AI"
       ],
       "title": "Authority",
       "type": "string"

@@ -40,11 +40,11 @@ def is_access_blocked_document(
     beginning = content[:16000].decode("utf-8-sig", errors="replace")
     title = re.search(r"<title[^>]*>(.*?)</title>", beginning, flags=re.I | re.S)
     title_text = re.sub(r"\s+", " ", title.group(1)).strip() if title else ""
-    blocked_heading = r"request access|access denied|attention required|just a moment|verify you are human"
+    blocked_heading = r"request access|access denied|attention required|just a moment|verify you are human|^sign in\b|^log[ -]?in\b|authentication required"
     if title_text and re.search(blocked_heading, title_text, flags=re.I):
         return True
     path = (urlparse(final_url or "").path or "").lower()
-    if re.search(r"/(?:unblock|access-denied|captcha|challenge)(?:/|$)", path):
+    if re.search(r"/(?:unblock|access-denied|captcha|challenge|login|signin|sign-in|authenticate)(?:/|$)", path):
         return True
     return bool(re.search(
         rf"(?im)^\s*#{{1,3}}\s*(?:{blocked_heading})(?:\s*[.!])?\s*$",
@@ -57,7 +57,7 @@ class DocumentFetcher(Protocol):
 
 
 class HttpDocumentFetcher:
-    """Fetch public source documents without attempting paywall or access-control bypass."""
+    """Direct HTTP reads using the host's existing access; no authentication bypass."""
 
     def __init__(
         self,
@@ -144,7 +144,46 @@ class LiteratureBundleManager:
             note = "No legally public full-text document URL was supplied by the retriever."
             resolved_url: str | None = None
             local_archive = candidate.get("local_archive_path")
-            if local_archive:
+            reading = candidate.get("source_read") or {}
+            private_original = reading.get("private_original_path")
+            if private_original and reading.get("status") == "READABLE_EXCERPT":
+                try:
+                    relative_source = Path(str(private_original))
+                    target = (self.repo.root / relative_source).resolve()
+                    private_root = (self.repo.root / "human_private/institutional_documents/originals").resolve()
+                    if (relative_source.is_absolute() or not target.is_relative_to(private_root)
+                            or (self.repo.root / relative_source).is_symlink()):
+                        raise ValueError("invalid institutional source path")
+                    content = target.read_bytes()
+                    digest = hashlib.sha256(content).hexdigest()
+                    if digest != reading.get("content_sha256"):
+                        raise ValueError("institutional source hash mismatch")
+                    media_type = reading["media_type"]
+                    extension = self._EXTENSIONS.get(media_type)
+                    if extension is None:
+                        raise ValueError("unsupported institutional source format")
+                    restricted = reading.get("access_basis") == "INSTITUTIONAL_SUBSCRIPTION"
+                    if restricted:
+                        # An OA repository's license cannot be silently
+                        # transferred to a different publisher copy.
+                        license_name = None
+                        update["license"] = None
+                    relative = relative_source if restricted else (
+                        Path("public/research/literature_bundle/documents") / self._filename(source, digest, extension))
+                    if not restricted:
+                        self._write_content_once_or_verify(relative, content, digest)
+                    update.update(archive_status=DocumentArchiveStatus.ARCHIVED,
+                                  access_basis=reading["access_basis"], archived_path=str(relative),
+                                  archived_sha256=digest, archived_media_type=media_type,
+                                  archived_size_bytes=len(content), archived_at=datetime.now(timezone.utc),
+                                  original_document_url=reading.get("resolved_url") or original_url)
+                    resolved_url = reading.get("resolved_url")
+                    note = ("Institutionally accessed original retained privately; excluded from public bundles."
+                            if restricted else "Public original archived from the verified local reading copy.")
+                except (OSError, ValueError, KeyError) as exc:
+                    update["archive_status"] = DocumentArchiveStatus.DOWNLOAD_FAILED
+                    note = f"Institutional source archival failed: {type(exc).__name__}"
+            elif local_archive:
                 try:
                     relative_source = Path(str(local_archive))
                     unresolved_source = self.repo.root / relative_source
@@ -231,9 +270,10 @@ class LiteratureBundleManager:
                 "publication_year": archived.publication_year,
                 "doi": archived.doi,
                 "citation_url": archived.url,
-                "original_document_url": original_url,
+                "original_document_url": archived.original_document_url,
                 "resolved_document_url": resolved_url,
                 "license": license_name,
+                "access_basis": archived.access_basis,
                 "archive_status": archived.archive_status.value,
                 "archived_path": archived.archived_path,
                 "archived_sha256": archived.archived_sha256,
@@ -254,7 +294,10 @@ class LiteratureBundleManager:
             )
         return archived_sources
 
-    def rebuild_download_bundle(self) -> Path:
+    def rebuild_download_bundle(self, *, export_zip: bool = False) -> Path:
+        """Refresh the source catalog; ZIP packaging is an explicit export only."""
+        if (self.repo.root / "public/archive_manifest.json").is_file():
+            raise ValueError("归档会议原文件与清单保持冻结；请用 ensemble gather 导出文献 ZIP")
         bundle_root = self.repo.root / "public/research/literature_bundle"
         records = []
         for path in sorted((bundle_root / "records").glob("*.json")):
@@ -281,6 +324,8 @@ class LiteratureBundleManager:
         )
         self._atomic_write(bundle_root / "manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False).encode())
         self._atomic_write(bundle_root / "README.md", readme.encode("utf-8"))
+        if not export_zip:
+            return bundle_root.relative_to(self.repo.root)
 
         zip_path = self.repo.root / "public/research/literature_bundle.zip"
         temporary = zip_path.with_name(f".{zip_path.name}.{secrets.token_hex(4)}.tmp")

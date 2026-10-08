@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from project_ensemble.domain import ReasoningEffort
+from project_ensemble.research.search_policy import general_search_allowed, general_search_engine
 
 
 _DIRECTORY = Path("human_private/runtime_controls")
@@ -25,10 +26,8 @@ def _records(repo) -> list[dict]:
 
 
 def record_run_control(repo, *, kind: str, target: str | None,
-                       value: int | str, reason: str) -> dict:
+                       value: int | str | bool, reason: str | None = None) -> dict:
     """Append a validated, immutable control record under the meeting lock."""
-    if not reason.strip():
-        raise ValueError("a runtime control change needs a Human reason")
     if kind == "model_concurrency":
         if not target or ":" not in target or not isinstance(value, int) or not 1 <= value <= 16:
             raise ValueError("model concurrency needs provider:model and a limit from 1 to 16")
@@ -38,9 +37,19 @@ def record_run_control(repo, *, kind: str, target: str | None,
     elif kind == "reasoning_effort":
         if not target or value not in {item.value for item in ReasoningEffort}:
             raise ValueError("reasoning effort needs a participant and a valid setting")
+    elif kind in {"general_search_allowed", "institutional_access_allowed"}:
+        if target is not None or not isinstance(value, bool):
+            raise ValueError("search/source access needs a meeting-wide boolean permission")
+    elif kind == "general_search_engine":
+        if target is not None or not isinstance(value, str) or value not in {"tavily", "parallel", "disabled"}:
+            raise ValueError("general search engine must be tavily, parallel or disabled")
     elif kind == "openalex_quota_policy":
-        if target is not None or value not in {"wait", "tavily"}:
-            raise ValueError("OpenAlex quota policy must be wait or tavily")
+        if target is not None or value not in {"wait", "tavily", "parallel"}:
+            raise ValueError("OpenAlex quota policy must be wait, tavily or parallel")
+        if value in {"tavily", "parallel"} and not general_search_allowed(repo):
+            raise ValueError("本会议当前禁止通用搜索；请先在会议设置中允许通用搜索，再调整额度策略")
+        if value in {"tavily", "parallel"} and value != general_search_engine(repo):
+            raise ValueError("额度回退引擎必须与本会议选择的通用搜索引擎一致")
     else:
         raise ValueError(f"unsupported runtime control: {kind}")
     number = len(_records(repo)) + 1
@@ -49,7 +58,7 @@ def record_run_control(repo, *, kind: str, target: str | None,
         "kind": kind,
         "target": target,
         "value": value,
-        "reason": reason.strip(),
+        "reason": (reason.strip() or None) if reason is not None else None,
         "authority": "HUMAN",
         "effect": "FUTURE_PROVIDER_CALLS_ONLY",
     }
@@ -81,10 +90,14 @@ def effective_research_parallelism(repo, frozen: int | None) -> int | None:
 
 def effective_openalex_quota_policy(repo, frozen: str) -> str:
     """Apply Human's latest append-only quota decision without editing the manifest."""
+    if not general_search_allowed(repo):
+        return "wait"
     result = frozen
     for record in _records(repo):
         if record["kind"] == "openalex_quota_policy":
             result = str(record["value"])
+    if result in {"tavily", "parallel"} and result != general_search_engine(repo):
+        return "wait"
     return result
 
 

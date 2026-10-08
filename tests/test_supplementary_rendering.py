@@ -105,3 +105,39 @@ def test_old_html_derivative_is_preserved_and_shortcut_points_to_v2(tmp_path):
     assert output["html"].resolve() != old.resolve()
     from project_ensemble.orchestration.academic_html import HTML_RENDERING_PROFILE
     assert HTML_RENDERING_PROFILE in str(output["html"].resolve())
+
+
+def test_renderer_change_generates_a_new_derivative_without_overwriting_old(tmp_path, monkeypatch):
+    repo, source = archived_report(tmp_path)
+    source_bytes = source.read_bytes()
+    monkeypatch.setattr(rendering, "_renderer_fingerprint", lambda _: "a" * 64)
+    first = rendering.render_additional_formats(repo, formats=("html",))["html"].resolve()
+    first_bytes, first_mtime = first.read_bytes(), first.stat().st_mtime_ns
+    monkeypatch.setattr(rendering, "_renderer_fingerprint", lambda _: "b" * 64)
+    second = rendering.render_additional_formats(repo, formats=("html",))["html"].resolve()
+    assert second != first
+    assert first.read_bytes() == first_bytes
+    assert first.stat().st_mtime_ns == first_mtime
+    assert source.read_bytes() == source_bytes
+    assert rendering.render_additional_formats(repo, formats=("html",))["html"].resolve() == second
+    assert json.loads(second.with_name("report.html.provenance.json").read_text())["renderer_sha256"] == "b" * 64
+
+
+def test_changed_citation_links_or_mathjax_settings_invalidate_html_cache(tmp_path, monkeypatch):
+    repo, _ = archived_report(tmp_path)
+    first = rendering.render_additional_formats(repo, formats=("html",))["html"].resolve()
+    monkeypatch.setattr(rendering, "_citation_links", lambda _: {"1": {"source": "https://example.org/new"}})
+    second = rendering.render_additional_formats(repo, formats=("html",))["html"].resolve()
+    monkeypatch.setenv("ENSEMBLE_MATHJAX_URL", "./mathjax.js")
+    third = rendering.render_additional_formats(repo, formats=("html",))["html"].resolve()
+    assert len({first, second, third}) == 3
+    assert 'src="./mathjax.js"' in third.read_text()
+
+
+def test_tampered_cached_derivative_is_not_overwritten(tmp_path):
+    repo, _ = archived_report(tmp_path)
+    output = rendering.render_additional_formats(repo, formats=("html",))["html"].resolve()
+    output.write_text("modified", encoding="utf-8")
+    with pytest.raises(ValueError, match="与来源记录不符"):
+        rendering.render_additional_formats(repo, formats=("html",))
+    assert output.read_text() == "modified"

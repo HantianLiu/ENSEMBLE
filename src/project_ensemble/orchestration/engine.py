@@ -40,6 +40,8 @@ from project_ensemble.runtime.research_fallbacks import ResearchFallbacks
 from project_ensemble.runtime.telemetry import TokenTelemetry, normalize_token_usage
 from project_ensemble.runtime.structured_output import parse_json_object
 from project_ensemble.runtime.technician import compact_evidence_request, record_context_repair
+from project_ensemble.runtime.exchange_index import ExchangeReplayIndex
+from project_ensemble.runtime.prompt_contract import prompt_contract_version, parse_json_prompt
 from project_ensemble.storage.meeting import MeetingRepository
 
 
@@ -84,6 +86,7 @@ class MeetingEngine:
             on_retry=self._report_retry,
         )
         self._backfill_token_telemetry()
+        self._replay_index = ExchangeReplayIndex(repo.root, self._representative_context_sections)
 
     def __del__(self):
         # Defensive cleanup for Ctrl-C/provider failures while the CLI is
@@ -179,7 +182,7 @@ class MeetingEngine:
             def fits(user_text: str) -> bool:
                 candidate = request.model_copy(update={"user_text": user_text})
                 return (
-                    (character_budget is None or len(user_text) <= character_budget)
+                    (character_budget is None or len(request.system_text) + len(user_text) <= character_budget)
                     and (input_budget is None or self._estimate_input_tokens(candidate) <= input_budget)
                 )
 
@@ -189,7 +192,10 @@ class MeetingEngine:
                     f"Technician 正在修剪 {participant_id} 的证据上下文；"
                     "必要的任务与证据预览会发送给所选模型供应商"
                 )
-                source = json.loads(request.user_text)
+                parsed = parse_json_prompt(request.user_text)
+                if parsed is None:
+                    return []
+                source, _suffix = parsed
                 task_hint = {
                     key: str(value)[:1200]
                     for key, value in source.items()
@@ -220,7 +226,12 @@ class MeetingEngine:
                         "TECHNICIAN", technician_adapter, technician_provider, technician_model,
                     ),
                 )
-                response_text = technician_adapter.generate(technician_request).text
+                ranking_response = technician_adapter.generate(technician_request)
+                self._record_exchange(
+                    "TECHNICIAN", technician_provider, f"{stage}_technician_context_ranking",
+                    technician_request, ranking_response,
+                )
+                response_text = ranking_response.text
                 priority = parse_json_object(response_text).get("priority")
                 return priority if isinstance(priority, list) else []
 
@@ -267,31 +278,7 @@ class MeetingEngine:
         sleep: Callable[[float], None] | None = None,
     ) -> GenerationResponse:
         self._raise_if_control_requested()
-        system_text = self._with_inherited_advisory_context(system_text)
-        if participant_id not in {"RESEARCH_DESK", "TECHNICIAN"}:
-            language = json.loads((self.repo.root / "identity_private/meeting_manifest.json").read_text(
-                encoding="utf-8"
-            )).get("deliberation_language")
-            if language in {"zh", "en", "fr"}:
-                names = {"zh": "Chinese", "en": "English", "fr": "French"}
-                system_text += (
-                    "\n\nHUMAN-SELECTED WRITING LANGUAGE FOR THIS MEETING: "
-                    f"Use {names[language]} for reader-facing deliberation prose. "
-                    "Preserve source quotations, proper names, and technical identifiers as needed. "
-                    "This language preference does not alter evidence or voting rules."
-                )
-        if participant_id == "CHAIR" or stage in {
-            "think_tank_epistemic_review", "think_tank_execution_review"
-        }:
-            policy_path = self.repo.root / "public/decision_policy.json"
-            if policy_path.is_file():
-                policy = json.loads(policy_path.read_text(encoding="utf-8"))
-                if policy.get("decision_rigor") == "relaxed":
-                    system_text += (
-                        "\n\nMEETING-SPECIFIC HUMAN PROCEDURAL RULING (overrides any 3/4 high-threshold "
-                        "wording in the baseline governance documents for this meeting only):\n"
-                        + json.dumps(policy, ensure_ascii=False, sort_keys=True)
-                    )
+        system_text = self._prepare_system_context(participant_id, system_text, stage)
         provider_id, model_id = self._runtime_for(participant_id)
         if max_output_tokens is None:
             max_output_tokens = self.output_token_budgets.get((provider_id, model_id))
@@ -311,10 +298,59 @@ class MeetingEngine:
             ),
             extra=extra or {},
         )
+        return self._invoke_request(
+            participant_id, provider_id, model_id, adapter, request, stage=stage, sleep=sleep,
+            temperature=temperature, max_output_tokens=max_output_tokens, extra=extra,
+            system_text=system_text, user_text=user_text,
+        )
+
+    def _prepare_system_context(self, participant_id: str, system_text: str, stage: str) -> str:
+        # Both dispatch and interrupted-call replay must use the same bytes.
+        # Legacy meetings keep their old advisory injection behavior.
+        version = prompt_contract_version(self.repo.root)
+        suffixes = []
+        if not (version >= 2
+                and participant_id in {"TECHNICIAN", "RESEARCH_DESK"}):
+            system_text = self._with_inherited_advisory_context(system_text)
+        if participant_id not in {"RESEARCH_DESK", "TECHNICIAN"}:
+            language = json.loads((self.repo.root / "identity_private/meeting_manifest.json").read_text(
+                encoding="utf-8"
+            )).get("deliberation_language")
+            if language in {"zh", "en", "fr"}:
+                names = {"zh": "Chinese", "en": "English", "fr": "French"}
+                language_suffix = (
+                    "\n\nHUMAN-SELECTED WRITING LANGUAGE FOR THIS MEETING: "
+                    f"Use {names[language]} for reader-facing deliberation prose. "
+                    "Preserve source quotations, proper names, and technical identifiers as needed. "
+                    "This language preference does not alter evidence or voting rules."
+                )
+                suffixes.append(language_suffix)
+        if participant_id == "CHAIR" or stage in {
+            "think_tank_epistemic_review", "think_tank_execution_review"
+        }:
+            policy_path = self.repo.root / "public/decision_policy.json"
+            if policy_path.is_file():
+                policy = json.loads(policy_path.read_text(encoding="utf-8"))
+                if policy.get("decision_rigor") == "relaxed":
+                    ruling_suffix = (
+                        "\n\nMEETING-SPECIFIC HUMAN PROCEDURAL RULING (overrides any 3/4 high-threshold "
+                        "wording in the baseline governance documents for this meeting only):\n"
+                        + json.dumps(policy, ensure_ascii=False, sort_keys=True)
+                    )
+                    suffixes.append(ruling_suffix)
+        suffix = "".join(suffixes)
+        if version >= 2 and suffix and system_text.endswith(suffix):
+            return system_text
+        return system_text + suffix
+
+    def _invoke_request(
+        self, participant_id, provider_id, model_id, adapter, request, *, stage, sleep,
+        temperature, max_output_tokens, extra, system_text, user_text,
+    ) -> GenerationResponse:
         character_budget = getattr(adapter, "maximum_input_characters", None)
         input_budget = self.input_context_budgets.get((provider_id, model_id))
         if (participant_id != "TECHNICIAN" and (
-            (character_budget is not None and len(request.user_text) > character_budget)
+            (character_budget is not None and len(request.system_text) + len(request.user_text) > character_budget)
             or (input_budget is not None and self._estimate_input_tokens(request) > input_budget)
         )):
             repaired = self._try_technician_context_repair(
@@ -324,7 +360,7 @@ class MeetingEngine:
             if repaired is not None:
                 request = repaired
         if character_budget is not None:
-            input_characters = len(request.user_text)
+            input_characters = len(request.system_text) + len(request.user_text)
             self.repo.events.append(
                 "MODEL_INPUT_CHARACTER_PREFLIGHT",
                 {
@@ -334,6 +370,8 @@ class MeetingEngine:
                     "model_id": model_id,
                     "stage": stage,
                     "input_characters": input_characters,
+                    "system_characters": len(request.system_text),
+                    "user_characters": len(request.user_text),
                     "maximum_input_characters": character_budget,
                     "decision": "ALLOW" if input_characters <= character_budget else "PAUSE",
                 },
@@ -1001,14 +1039,17 @@ class MeetingEngine:
         stage: str,
     ) -> GenerationResponse | None:
         """Return the newest durable response for an identical interrupted request."""
-        system_text = self._with_inherited_advisory_context(system_text)
+        system_text = self._prepare_system_context(participant_id, system_text, stage)
         exchange_root = self.repo.root / "governance_private/provider_exchanges"
         if not exchange_root.exists():
             return None
         replacement_cutoff_ns = latest_runtime_replacement_at_ns(self.repo, participant_id)
         matches: list[tuple[int, GenerationResponse]] = []
-        for path in exchange_root.glob("X-*.json"):
+        candidates = self._replay_index.candidates(participant_id, stage, system_text, user_text)
+        for path in (exchange_root.glob("X-*.json") if candidates is None else candidates):
             try:
+                if path.is_symlink():
+                    continue
                 exchange_time_ns = path.stat().st_mtime_ns
                 if exchange_time_ns < replacement_cutoff_ns:
                     continue
@@ -1098,6 +1139,8 @@ class MeetingEngine:
         heading = "## INHERITED ADVISORY DOCUMENT"
         if heading in system_text:
             return system_text
+        if prompt_contract_version(self.repo.root) >= 2 and "## 继承的建议性文书" in system_text:
+            return system_text
         path = self.repo.root / "public/continuation/advisory_context.md"
         if not path.is_file():
             return system_text
@@ -1121,15 +1164,30 @@ class MeetingEngine:
         """Canonicalize known top-level context sections for layout-only recovery."""
 
         heading = re.compile(
-            r"(?m)^## (COMMON RULES|YOUR PERSONA|CURRENT STAGE|PUBLIC STATE: [^\n]+|PUBLIC RESEARCH EVIDENCE \(BOUNDED RELEVANCE VIEW\)|YOUR STATE: [^\n]+)\n"
+            r"(?m)^## (COMMON RULES|共同规则|YOUR PERSONA|TASK EMPHASIS|本次职能侧重|"
+            r"CURRENT STAGE|当前阶段|PUBLIC STATE: [^\n]+|公开材料: [^\n]+|"
+            r"PUBLIC RESEARCH EVIDENCE \(BOUNDED RELEVANCE VIEW\)|公开研究证据（限量相关视图）|"
+            r"YOUR STATE: [^\n]+|OWN RECORD: [^\n]+|本人记录: [^\n]+)\n"
         )
         matches = list(heading.finditer(text))
         if not matches or matches[0].start() != 0:
             return None
         sections: list[tuple[str, str]] = []
+        aliases = {
+            "共同规则": "COMMON RULES", "当前阶段": "CURRENT STAGE",
+            "TASK EMPHASIS": "YOUR PERSONA", "本次职能侧重": "YOUR PERSONA",
+            "公开研究证据（限量相关视图）": "PUBLIC RESEARCH EVIDENCE (BOUNDED RELEVANCE VIEW)",
+        }
         for index, match in enumerate(matches):
             end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            sections.append((match.group(1), text[match.end() : end].strip()))
+            title = aliases.get(match.group(1), match.group(1))
+            for prefix, canonical in (("公开材料: ", "PUBLIC STATE: "),
+                                      ("OWN RECORD: ", "YOUR STATE: "),
+                                      ("本人记录: ", "YOUR STATE: ")):
+                if title.startswith(prefix):
+                    title = canonical + title[len(prefix):]
+                    break
+            sections.append((title, text[match.end() : end].strip()))
         titles = [title for title, _ in sections]
         if any(titles.count(required) != 1 for required in ("COMMON RULES", "YOUR PERSONA", "CURRENT STAGE")):
             return None
@@ -1253,6 +1311,7 @@ class MeetingEngine:
             "response": response.model_dump(mode="json"),
         }
         self.repo.docs.write_once(relative, json.dumps(record, indent=2, ensure_ascii=False))
+        self._replay_index.add(self.repo.root / relative, record)
         self.repo.events.append(
             "PROVIDER_EXCHANGE_RECORDED",
             {
@@ -1276,6 +1335,7 @@ class MeetingEngine:
             model_id=response.model_id,
             stage=stage,
         )
+        telemetry = self._request_telemetry(telemetry, request)
         telemetry_relative = Path("governance_private/telemetry") / f"{exchange_id}.json"
         self.repo.docs.write_once(
             telemetry_relative,
@@ -1303,6 +1363,18 @@ class MeetingEngine:
         )
         return telemetry
 
+    def _request_telemetry(self, telemetry: TokenTelemetry, request: GenerationRequest) -> TokenTelemetry:
+        return telemetry.model_copy(update={
+            "system_characters": len(request.system_text),
+            "user_characters": len(request.user_text),
+            "estimated_input_tokens": self._estimate_input_tokens(request),
+            "system_sha256": hashlib.sha256(request.system_text.encode("utf-8")).hexdigest(),
+            "request_sha256": hashlib.sha256(json.dumps(
+                request.model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+        })
+
     def _backfill_token_telemetry(self) -> None:
         """Normalize usage already retained before first-class telemetry existed."""
 
@@ -1311,6 +1383,9 @@ class MeetingEngine:
             return
         created = 0
         for exchange_path in sorted(exchange_root.glob("X-*.json")):
+            # Do not decode every historical prompt on every resume.
+            if (self.repo.root / "governance_private/telemetry" / exchange_path.name).is_file():
+                continue
             exchange = json.loads(exchange_path.read_text(encoding="utf-8"))
             exchange_id = str(exchange["exchange_id"])
             telemetry_relative = Path("governance_private/telemetry") / f"{exchange_id}.json"
@@ -1328,6 +1403,12 @@ class MeetingEngine:
                 model_id=str(exchange["model_id"]),
                 stage=str(exchange["stage"]),
             )
+            if isinstance(exchange.get("request"), dict):
+                try:
+                    telemetry = self._request_telemetry(
+                        telemetry, GenerationRequest.model_validate(exchange["request"]))
+                except (ValueError, TypeError):
+                    pass
             self.repo.docs.write_once(telemetry_relative, telemetry.model_dump_json(indent=2))
             created += 1
         if created:

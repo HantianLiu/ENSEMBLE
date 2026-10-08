@@ -52,6 +52,19 @@ def test_science_delegation_can_switch_during_meeting_without_rewriting_manifest
     ] == "human"
 
 
+def test_meeting_ai_settings_include_and_control_existing_chair_delegation(tmp_path):
+    from project_ensemble.runtime.ai_delegation_settings import (
+        available_delegations, delegation_setting, set_delegation_settings,
+    )
+    repo = make_rendering_repo(tmp_path)
+    assert available_delegations(repo) == ["scholarly_science"]
+    grant = set_delegation_settings(repo, {"scholarly_science": True})
+    assert delegation_setting(repo, "scholarly_science") == (True, grant)
+    set_delegation_settings(repo, {"scholarly_science": False})
+    assert ScienceConsultationAuthorityService(repo).current()[0] == "human"
+    assert json.loads((repo.root / grant).read_text())["authority"] == "chair"
+
+
 def test_science_authority_cli_switches_by_direct_path(tmp_path, capsys):
     from project_ensemble.cli import cmd_science_authority
 

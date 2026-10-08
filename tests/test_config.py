@@ -108,6 +108,27 @@ api_key_env = "LITHOSAI_API_KEY"
     assert provider.reasoning_effort_map == {"low": "low", "medium": "high", "high": "max"}
 
 
+def test_siliconflow_profile_gets_model_scoped_reasoning_effort_mapping(tmp_path):
+    path = tmp_path / "ensemble.toml"
+    path.write_text(
+        """
+[providers.siliconflow]
+kind = "openai_compatible"
+base_url = "https://api.siliconflow.cn/v1"
+api_key_env = "SILICONFLOW_API_KEY"
+""".strip() + "\n",
+        encoding="utf-8",
+    )
+
+    provider = load_config(path).providers["siliconflow"]
+    assert provider.reasoning_effort_transport == "openai"
+    assert provider.reasoning_effort_map == {"high": "xhigh"}
+    assert provider.supports_reasoning_effort("deepseek-ai/DeepSeek-V4-Flash", "high")
+    assert provider.supports_reasoning_effort("Pro/zai-org/GLM-5.2", "high")
+    assert not provider.supports_reasoning_effort("Qwen/Qwen3-235B-A22B", "high")
+    assert not provider.supports_reasoning_effort("deepseek-ai/DeepSeek-V4-Flash", "medium")
+
+
 def test_concurrency_configuration_is_model_scoped_and_defaults_to_auto():
     provider = ProviderConfig(
         kind="openai_compatible",
@@ -186,6 +207,7 @@ def test_research_concurrency_controls_are_separate_and_positive():
     assert config.openalex_max_concurrent_requests == 1
     assert config.max_concurrent_document_downloads == 4
     assert config.tavily.max_concurrent_requests == 4
+    assert config.tavily.search_depth == "basic"
 
     for field in (
         "max_concurrent_claim_groups",

@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 from project_ensemble.config import EnsembleConfig, ProviderConfig, load_config
 from project_ensemble.interface_language import ui_label
+from project_ensemble.selection_input import parse_number_selection
 
 
 def settings_dir() -> Path:
@@ -35,6 +36,10 @@ def user_config_path() -> Path:
 
 def _removed_providers_path() -> Path:
     return settings_dir() / "removed_providers.toml"
+
+
+def _hidden_models_path() -> Path:
+    return settings_dir() / "hidden_models.toml"
 
 
 def removed_provider_ids() -> set[str]:
@@ -58,6 +63,49 @@ def _clear_provider_removal(provider_id: str) -> None:
         _save_removed_provider_ids(removed)
 
 
+def hidden_model_ids(provider_id: str | None = None) -> set[str] | dict[str, set[str]]:
+    """Return user-hidden model IDs, scoped by provider and independent of meetings."""
+    try:
+        data = tomllib.loads(_hidden_models_path().read_text(encoding="utf-8"))
+        raw = data.get("hidden_models", {})
+        if not isinstance(raw, dict):
+            return set() if provider_id is not None else {}
+        result = {
+            str(key): {str(model_id) for model_id in model_ids if isinstance(model_id, str) and model_id}
+            for key, model_ids in raw.items()
+            if isinstance(model_ids, list)
+        }
+    except (OSError, tomllib.TOMLDecodeError, AttributeError, TypeError):
+        result = {}
+    if provider_id is not None:
+        return result.get(provider_id, set())
+    return result
+
+
+def set_model_visibility(provider_id: str, model_ids: list[str], *, hidden: bool) -> Path:
+    """Hide or reveal a batch of provider models for future model-selection menus."""
+    if not provider_id or any(not isinstance(model_id, str) or not model_id.strip() for model_id in model_ids):
+        raise ValueError("provider and model IDs must be non-empty")
+    catalog = hidden_model_ids()
+    assert isinstance(catalog, dict)
+    selected = set(model_ids)
+    current = catalog.setdefault(provider_id, set())
+    if hidden:
+        current.update(selected)
+    else:
+        current.difference_update(selected)
+    if not current:
+        catalog.pop(provider_id, None)
+    lines = ["[hidden_models]"]
+    for key, values in sorted(catalog.items()):
+        lines.append(f"{json.dumps(key, ensure_ascii=False)} = {_value(sorted(values))}")
+    rendered = "\n".join(lines) + "\n"
+    tomllib.loads(rendered)
+    path = _hidden_models_path()
+    _atomic_write(path, rendered)
+    return path
+
+
 def _value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -78,7 +126,7 @@ def _table(path: str, mapping: dict) -> str:
     for key, value in mapping.items():
         if value is None:
             continue
-        if isinstance(value, dict) and key in {"tavily", "email"}:
+        if isinstance(value, dict) and key in {"tavily", "parallel", "email"}:
             nested.append((key, value))
         else:
             lines.append(f"{json.dumps(str(key), ensure_ascii=False)} = {_value(value)}")
@@ -284,6 +332,8 @@ def save_search_backends(
     *, openalex_email: str | None, openalex_key_env: str = "OPENALEX_API_KEY",
     openalex_key_file: str | None = None, tavily_enabled: bool = False,
     tavily_key_env: str = "TAVILY_API_KEY", tavily_key_file: str | None = None,
+    parallel_enabled: bool | None = None, parallel_key_env: str = "PARALLEL_API_KEY",
+    parallel_key_file: str | None = None, parallel_mode: str = "fast",
     seed_path: str | Path | None = None,
 ) -> Path:
     path = ensure_user_config(seed_path)
@@ -297,9 +347,169 @@ def save_search_backends(
     tavily["enabled"] = tavily_enabled
     tavily["api_key_env"] = tavily_key_env
     tavily["api_key_file"] = tavily_key_file
+    if parallel_enabled is not None:
+        if parallel_mode not in {"fast", "turbo"}:
+            raise ValueError("Parallel mode must be fast or turbo")
+        parallel = research.setdefault("parallel", {})
+        parallel.update(enabled=parallel_enabled, api_key_env=parallel_key_env,
+                        api_key_file=parallel_key_file, mode=parallel_mode,
+                        max_results_per_query=10)
     _write_user_config(path, data)
     load_config(path)
     return path
+
+
+def _settings_discovery_config(config_path: Path, seed_path: str | Path | None):
+    config = load_config(config_path)
+    if seed_path:
+        source = load_config(seed_path)
+        providers = dict(source.providers)
+        providers.update(config.providers)
+        config = config.model_copy(update={"providers": providers})
+    return config
+
+
+def _select_model_visibility_batch(
+    wizard,
+    *,
+    provider_id: str,
+    model_ids: list[str],
+    hide: bool,
+    t,
+    output: TextIO,
+) -> None:
+    candidates = sorted(set(model_ids))
+    if not candidates:
+        print(t("没有符合条件的模型。", "No matching models."), file=output)
+        return
+    query = wizard.input(t(
+        "按模型 ID 搜索（留空查看全部，输入 q 返回）: ",
+        "Search model IDs (blank for all, q to return): ",
+    )).strip()
+    if query.lower() in {"q", "quit", "b", "back"}:
+        return
+    if query:
+        candidates = [model_id for model_id in candidates if query.casefold() in model_id.casefold()]
+    if not candidates:
+        print(t("没有匹配模型；隐藏状态未改变。", "No models matched; visibility is unchanged."), file=output)
+        return
+
+    page_size = 40
+    page = 0
+    while True:
+        page_count = (len(candidates) + page_size - 1) // page_size
+        page = min(max(page, 0), page_count - 1)
+        page_models = candidates[page * page_size:(page + 1) * page_size]
+        print(t(
+            f"\n模型窗口 · 匹配 {len(candidates)} 个 · 第 {page + 1}/{page_count} 页",
+            f"\nModel window · {len(candidates)} matches · page {page + 1}/{page_count}",
+        ), file=output)
+        for index, model_id in enumerate(page_models, 1):
+            print(f"  {index:>2}. {model_id}", file=output)
+        action = wizard.input(t(
+            "输入编号（空格/逗号分隔，1-3 表示连续编号），n 下一页，p 上一页，q 返回: ",
+            "Enter numbers (spaces/commas; 1-3 selects a range), n next, p previous, q back: ",
+        )).strip().lower()
+        if action in {"q", "b", "back", ""}:
+            return
+        if action == "n":
+            page = (page + 1) % page_count
+            continue
+        if action == "p":
+            page = (page - 1) % page_count
+            continue
+        indexes = parse_number_selection(action, len(page_models))
+        if not indexes:
+            print(t("编号无效；状态未改变。", "Invalid selection; visibility is unchanged."), file=output)
+            continue
+        selected = [page_models[index - 1] for index in sorted(set(indexes))]
+        set_model_visibility(provider_id, selected, hidden=hide)
+        print(t(
+            f"已{'隐藏' if hide else '恢复显示'} {len(selected)} 个模型；可继续另一轮筛选。",
+            f"{len(selected)} model(s) {'hidden' if hide else 'restored'}; you can run another round.",
+        ), file=output)
+        return
+
+
+def _manage_model_visibility_interactively(
+    wizard,
+    *,
+    provider_id: str,
+    seed_path: str | Path | None,
+    t,
+    output: TextIO,
+    initial_catalog: list | None = None,
+) -> Path | None:
+    """Fetch the live catalog, then manage a persistent provider-scoped hidden list."""
+    config_path = ensure_user_config(seed_path)
+    catalog = list(initial_catalog) if initial_catalog is not None else None
+    catalog_available = catalog is not None
+    while True:
+        if catalog is None:
+            try:
+                from project_ensemble.startup import discover_models
+
+                config = _settings_discovery_config(config_path, seed_path)
+                catalog = discover_models(config, [provider_id], include_hidden=True)
+                catalog_available = True
+            except Exception as exc:
+                print(t(
+                    f"实时模型目录暂时无法读取：{exc}。仍可修改已保存的隐藏清单，或在此重试。",
+                    f"The live model catalog could not be fetched: {exc}. You can still edit the saved hidden list or retry here.",
+                ), file=output)
+                catalog = []
+                catalog_available = False
+        all_ids = sorted({str(model.model_id) for model in catalog})
+        hidden = hidden_model_ids(provider_id)
+        assert isinstance(hidden, set)
+        current_ids = set(all_ids)
+        visible_count = len(current_ids - hidden)
+        if catalog_available:
+            print(t(
+                f"\n{provider_id} 模型目录：实时返回 {len(all_ids)} 个，可见 {visible_count} 个，隐藏 {len(hidden)} 个。",
+                f"\n{provider_id} catalog: {len(all_ids)} live models, {visible_count} visible, {len(hidden)} hidden.",
+            ), file=output)
+        else:
+            print(t(
+                f"\n{provider_id} 隐藏清单：已保存 {len(hidden)} 个模型；当前目录不可用。",
+                f"\n{provider_id} hidden list: {len(hidden)} saved models; the live catalog is unavailable.",
+            ), file=output)
+        options = []
+        if catalog_available:
+            options.append(("hide", t("搜索并隐藏模型（可批量、多轮）", "Search and hide models (bulk, repeatable)")))
+        options.extend([
+            ("expand", t(f"展开隐藏模型窗口（{len(hidden)} 个）", f"Expand hidden-model window ({len(hidden)})")),
+            ("refresh", t("重新抓取供应商模型目录", "Refresh provider model catalog")),
+            ("back", t("完成，返回", "Done, go back")),
+        ])
+        action = wizard._choose_one(t("模型可见性", "Model visibility"), options)
+        if action == "back":
+            return config_path
+        if action == "refresh":
+            catalog = None
+            continue
+        if action == "hide":
+            candidates = sorted(current_ids - hidden)
+            _select_model_visibility_batch(
+                wizard, provider_id=provider_id, model_ids=candidates,
+                hide=True, t=t, output=output,
+            )
+            continue
+        if action == "expand":
+            if not hidden:
+                print(t("隐藏列表为空。", "The hidden list is empty."), file=output)
+                continue
+            print(t(
+                "\n已隐藏模型（带 † 表示当前未出现在供应商目录中）：" if catalog_available else "\n已隐藏模型：",
+                "\nHidden models († means not currently returned by the provider):" if catalog_available else "\nHidden models:",
+            ), file=output)
+            for index, model_id in enumerate(sorted(hidden), 1):
+                marker = " †" if catalog_available and model_id not in current_ids else ""
+                print(f"  {index:>3}. {model_id}{marker}", file=output)
+            _select_model_visibility_batch(
+                wizard, provider_id=provider_id, model_ids=sorted(hidden),
+                hide=False, t=t, output=output,
+            )
 
 
 def appearance() -> tuple[str, int]:
@@ -335,11 +545,16 @@ def _manage_provider_interactively(wizard, *, seed_path, secret_input, t, output
         ("rename", t("修改显示名称", "Change display name")),
         ("url", t("修改 API 基础地址", "Change API base URL")),
         ("key", t("更换 API 密钥", "Replace API key")),
+        ("models", t("模型可见性：实时抓取、隐藏或恢复模型", "Model visibility: fetch, hide, or restore models")),
         ("delete", t("删除供应商配置", "Delete provider configuration")),
         ("back", t("返回供应商列表", "Back to provider list")),
     ])
     if action == "back":
         return None
+    if action == "models":
+        return _manage_model_visibility_interactively(
+            wizard, provider_id=provider_id, seed_path=seed_path, t=t, output=output,
+        )
     if action == "rename":
         display_name = wizard.input(t("新的显示名称: ", "New display name: ")).strip()
         if not display_name:
@@ -399,7 +614,7 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
         ("language", "语言：界面语言及未来会议正文语言默认值"),
         ("appearance", "界面外观"),
         ("provider", "模型供应商"),
-        ("search", "联网搜索后端：OpenAlex / Tavily"),
+        ("search", "联网搜索后端：OpenAlex / Tavily / Parallel（查看、检测或单独修改）"),
         ("freshness", "证据包有效期"),
         ("back", "返回首页"),
     ])
@@ -446,62 +661,11 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
         print(t(f"已保存到 {path}；只影响以后创建的会议，不改动已冻结会议。", f"Saved to {path}; affects only future meetings, not frozen ones."), file=output)
         return path
     if action == "search":
-        print(t("OpenAlex 是学术检索主后端；Tavily 可选作网页检索补充。", "OpenAlex is the primary academic search backend; Tavily can supplement it with web search."), file=output)
-        email = wizard.input("OpenAlex 联系邮箱（可留空）: ").strip() or None
-        openalex_source = wizard._choose_one("OpenAlex 凭据", [
-            ("anonymous", "匿名访问（可能受到较低的服务限额约束）"),
-            ("env", "引用已有环境变量"),
-            ("file", "引用已有外部密钥文件"),
-            ("input", "输入并保存到本机用户目录"),
-        ])
-        openalex_env = "" if openalex_source == "anonymous" else "OPENALEX_API_KEY"
-        openalex_file = None
-        if openalex_source != "anonymous":
-            openalex_env = wizard.input("OpenAlex 环境变量名 [OPENALEX_API_KEY]: ").strip() or openalex_env
-            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", openalex_env):
-                raise ValueError("无效的环境变量名")
-            if openalex_source == "file":
-                openalex_file = wizard.input("OpenAlex 外部密钥文件路径: ").strip()
-                if not Path(openalex_file).expanduser().is_file():
-                    raise ValueError("OpenAlex 密钥文件不存在")
-                openalex_file = str(Path(openalex_file).expanduser().resolve())
-            elif openalex_source == "input":
-                secret = (secret_input or getpass.getpass)("OpenAlex API 密钥（不回显）: ")
-                openalex_file = str(store_secret("openalex", openalex_env, secret))
-        tavily_enabled = wizard._choose_one("网页检索补充", [
-            ("no", "不启用 Tavily；仅用 OpenAlex"),
-            ("yes", "启用 Tavily；同时使用 OpenAlex 与 Tavily"),
-        ]) == "yes"
-        tavily_env = "TAVILY_API_KEY"
-        tavily_file = None
-        if tavily_enabled:
-            tavily_env = wizard.input("Tavily 环境变量名 [TAVILY_API_KEY]: ").strip() or tavily_env
-            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", tavily_env):
-                raise ValueError("无效的环境变量名")
-            source = wizard._choose_one("Tavily 凭据", [
-                ("env", "引用已有环境变量"),
-                ("file", "引用已有外部密钥文件"),
-                ("input", "输入并保存到本机用户目录"),
-            ])
-            if source == "file":
-                tavily_file = wizard.input("Tavily 外部密钥文件路径: ").strip()
-                if not Path(tavily_file).expanduser().is_file():
-                    raise ValueError("Tavily 密钥文件不存在")
-                tavily_file = str(Path(tavily_file).expanduser().resolve())
-            elif source == "input":
-                secret = (secret_input or getpass.getpass)("Tavily API 密钥（不回显）: ")
-                tavily_file = str(store_secret("tavily", tavily_env, secret))
-        path = save_search_backends(
-            openalex_email=email, openalex_key_env=openalex_env,
-            openalex_key_file=openalex_file, tavily_enabled=tavily_enabled,
-            tavily_key_env=tavily_env, tavily_key_file=tavily_file,
-            seed_path=seed_path,
-        )
-        print(t(f"联网检索设置已保存：{path}；只影响新会议。", f"Search settings saved to {path}; affects new meetings only."), file=output)
-        return path
+        from project_ensemble.search_backend_settings import configure_search_interactively
+        return configure_search_interactively(wizard, seed_path=seed_path, secret_input=secret_input)
     provider_action = wizard._choose_one("模型供应商", [
         ("add", t("添加供应商", "Add a provider")),
-        ("manage", t("管理已有供应商：改名、修改网址、更换密钥或删除", "Manage providers: rename, change URL, replace key, or delete")),
+        ("manage", t("管理已有供应商：改名、修改网址、更换密钥、模型可见性或删除", "Manage providers: rename, URL, key, model visibility, or delete")),
         ("back", t("返回设置", "Back to Settings")),
     ])
     if provider_action == "back":
@@ -519,6 +683,7 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
                 print(f"  {existing_id} · {existing.display_name or existing_id}", file=output)
     kind = wizard._choose_one("调用方式", [
         ("lithosai", "LithosAI（OpenAI 兼容 API；自动填入官方地址）"),
+        ("siliconflow", "SiliconFlow（OpenAI 兼容 API；自动配置推理档位）"),
         ("openai_compatible", "OpenAI 兼容 API（DeepSeek、GLM、Kimi 等）"),
         ("gemini", "Google Gemini 原生 API"),
         ("codex_subscription", "Codex CLI；使用本机 ChatGPT 登录，不输入 API 密钥"),
@@ -528,14 +693,15 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
     if kind == "back":
         return None
     lithosai_preset = kind == "lithosai"
-    if lithosai_preset:
+    siliconflow_preset = kind == "siliconflow"
+    if lithosai_preset or siliconflow_preset:
         kind = "openai_compatible"
-        name = "LithosAI"
-        provider_id = "lithos"
+        name = "LithosAI" if lithosai_preset else "SiliconFlow"
+        provider_id = "lithos" if lithosai_preset else "siliconflow"
         if existing_path and provider_id in existing_providers:
             print(t(
-                "LithosAI 已配置；没有覆盖现有设置。",
-                "LithosAI is already configured; existing settings were left unchanged.",
+                f"{name} 已配置；没有覆盖现有设置。",
+                f"{name} is already configured; existing settings were left unchanged.",
             ), file=output)
             return existing_path
     else:
@@ -554,16 +720,27 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
             "reasoning_effort_map": {"low": "low", "medium": "high", "high": "max"},
             "reasoning_effort_model_patterns": ["*kimi-k3*"],
         })
+    if siliconflow_preset:
+        fields.update({
+            "reasoning_effort_transport": "openai",
+            "reasoning_effort_map": {"high": "xhigh"},
+            "reasoning_effort_model_patterns": [
+                "Pro/deepseek-ai/DeepSeek-V4",
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "Pro/zai-org/GLM-5.2",
+            ],
+        })
     pending_secret: tuple[str, str, str] | None = None
     if kind in {"openai_compatible", "gemini"}:
         default_url = (
             "https://generativelanguage.googleapis.com/v1beta" if kind == "gemini"
             else "https://api.lithosai.cloud/v1" if lithosai_preset
+            else "https://api.siliconflow.cn/v1" if siliconflow_preset
             else ""
         )
-        if lithosai_preset:
+        if lithosai_preset or siliconflow_preset:
             url = default_url
-            print(t(f"LithosAI API 地址：{url}", f"LithosAI API base URL: {url}"), file=output)
+            print(t(f"{name} API 地址：{url}", f"{name} API base URL: {url}"), file=output)
         else:
             url = wizard.input(t(
                 f"API 基础地址{f' [默认 {default_url}]' if default_url else ''}: ",
@@ -582,8 +759,12 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
     else:
         auth = "login" if kind == "codex_subscription" else "key"
     if auth == "key":
-        default_env = "LITHOSAI_API_KEY" if lithosai_preset else re.sub(r"[^A-Z0-9_]", "_", provider_id.upper()) + "_API_KEY"
-        env_name = default_env if lithosai_preset else (
+        default_env = (
+            "LITHOSAI_API_KEY" if lithosai_preset else
+            "SILICONFLOW_API_KEY" if siliconflow_preset else
+            re.sub(r"[^A-Z0-9_]", "_", provider_id.upper()) + "_API_KEY"
+        )
+        env_name = default_env if (lithosai_preset or siliconflow_preset) else (
             wizard.input(t(f"环境变量名称 [{default_env}]: ", f"Environment variable name [{default_env}]: ")).strip()
             or default_env
         )
@@ -617,4 +798,10 @@ def configure_interactively(wizard, *, seed_path: str | Path | None = None, secr
     path = add_provider(provider_id, provider, seed_path=seed_path)
     print(t(f"供应商 {name} 已加入：{path.parent / 'model_config.toml'}", f"Provider {name} added to {path.parent / 'model_config.toml'}"), file=output)
     print(t("密钥值不会写入会议文件或项目目录。运行 ensemble doctor 检查配置。", "Secret values are not written into meeting files or the project directory. Run ensemble doctor to check configuration."), file=output)
+    if kind in {"openai_compatible", "gemini"}:
+        print(t("现在抓取该供应商当前可用的模型；隐藏项会保存在本机设置，可之后多轮调整。",
+                "Fetching this provider's current model catalog; hidden models are saved in local settings and can be adjusted in multiple rounds."), file=output)
+        return _manage_model_visibility_interactively(
+            wizard, provider_id=provider_id, seed_path=seed_path, t=t, output=output,
+        )
     return path

@@ -31,6 +31,9 @@ from project_ensemble.storage.documents import ImmutableDocumentStore
 from project_ensemble.storage.events import HashChainEventLog
 from project_ensemble.storage.human_outputs import ensure_visible_link
 from project_ensemble import GOVERNANCE_VERSION, __version__
+from project_ensemble.runtime.prompt_contract import (
+    CURRENT_PROMPT_CONTRACT_VERSION, CURRENT_CONTEXT_ASSEMBLY_VERSION,
+)
 
 
 class PublicMeetingManifest(BaseModel):
@@ -42,6 +45,10 @@ class PublicMeetingManifest(BaseModel):
     representative_count: int | None = None
     audit_member_count: int | None = None
     research_enabled: bool = False
+    general_search_allowed: bool = True
+    institutional_access_allowed: bool = False
+    academic_search_engine: Literal["openalex"] = "openalex"
+    general_search_engine: Literal["tavily", "parallel", "disabled"] | None = None
     planning_exploration_enabled: bool = False
     # A missing field keeps meetings created before this policy on their frozen flow.
     planning_replan_reference_enabled: bool = False
@@ -75,6 +82,7 @@ class SessionConfigurationReference(BaseModel):
     config_sha256: str
     snapshot_path: str
     governance_docs_path: str | None = None
+    governance_snapshot_path: str | None = None
     model_config_path: str | None = None
     model_config_sha256: str | None = None
     model_config_snapshot_path: str | None = None
@@ -91,6 +99,11 @@ class PrivateMeetingManifest(BaseModel):
     governance_digest: str
     software_version: str = __version__
     governance_version: str = GOVERNANCE_VERSION
+    # Missing fields retain the original prompt/context assembly contract.
+    prompt_contract_version: int = Field(default=1, ge=1, le=3)
+    context_assembly_version: int = Field(default=1, ge=1, le=3)
+    evidence_read_protocol_version: int = Field(default=0, ge=0, le=1)
+    evidence_read_round_limit: int = Field(default=8, ge=1, le=32)
     representative_prompt_family: Literal[
         "legacy_shared", "deliberation", "literature_research"
     ] = "legacy_shared"
@@ -98,13 +111,17 @@ class PrivateMeetingManifest(BaseModel):
     representative_reasoning_effective: dict[str, ReasoningEffort] = Field(default_factory=dict)
     chair_reasoning_effort: ReasoningEffort = ReasoningEffort.DEFAULT
     research_enabled: bool = False
+    general_search_allowed: bool = True
+    institutional_access_allowed: bool = False
+    academic_search_engine: Literal["openalex"] = "openalex"
+    general_search_engine: Literal["tavily", "parallel", "disabled"] | None = None
     # Frozen per meeting: old v0.7 meetings retain their original planning flow.
     planning_exploration_enabled: bool = False
     decision_rigor: DecisionRigor = DecisionRigor.STRICT
     research_model: tuple[str, str] | None = None
     research_reasoning_effort: ReasoningEffort | None = None
     openalex_max_results_per_query: int | None = Field(default=None, ge=1, le=50)
-    openalex_quota_policy: Literal["wait", "tavily"] | None = None
+    openalex_quota_policy: Literal["wait", "tavily", "parallel"] | None = None
     research_max_concurrent_claim_groups: int | None = Field(default=None, ge=1)
     model_concurrency_limits: dict[str, int] = Field(default_factory=dict)
     model_concurrency_sources: dict[str, str] = Field(default_factory=dict)
@@ -277,10 +294,14 @@ class MeetingRepository:
         representative_reasoning_effective: dict[tuple[str, str], ReasoningEffort] | None = None,
         chair_reasoning_effort: ReasoningEffort = ReasoningEffort.DEFAULT,
         research_enabled: bool = False,
+        general_search_allowed: bool = True,
+        institutional_access_allowed: bool = False,
+        academic_search_engine: Literal["openalex"] = "openalex",
+        general_search_engine: Literal["tavily", "parallel", "disabled"] | None = None,
         research_model: tuple[str, str] | None = None,
         research_reasoning_effort: ReasoningEffort | None = None,
         openalex_max_results_per_query: int | None = None,
-        openalex_quota_policy: Literal["wait", "tavily"] | None = None,
+        openalex_quota_policy: Literal["wait", "tavily", "parallel"] | None = None,
         research_max_concurrent_claim_groups: int | None = None,
         model_concurrency_limits: dict[tuple[str, str], int] | None = None,
         model_concurrency_sources: dict[tuple[str, str], str] | None = None,
@@ -314,7 +335,10 @@ class MeetingRepository:
         fast_planner_reasoning_effective: dict[str, ReasoningEffort] | None = None,
         technician_model: tuple[str, str] | None = None,
         technician_reasoning_effort: ReasoningEffort | None = None,
+        evidence_read_round_limit: int = 8,
     ) -> "MeetingRepository":
+        if type(evidence_read_round_limit) is not int or not 1 <= evidence_read_round_limit <= 32:
+            raise ValueError("evidence read technical window must be between 1 and 32 turns")
         if (technician_model is None) != (technician_reasoning_effort is None):
             raise ValueError("Technician model and reasoning effort must be configured together")
         if rendering_science_consultation_authority == "chair" and meeting_type != MeetingType.SCHOLARLY_RENDERING:
@@ -342,6 +366,18 @@ class MeetingRepository:
                 raise ValueError("OpenAlex results per query must be between 1 and 50")
         if openalex_quota_policy is not None and not research_enabled:
             raise ValueError("OpenAlex quota policy requires Research Desk")
+        if not isinstance(general_search_allowed, bool):
+            raise ValueError("meeting general-search permission must be boolean")
+        if type(institutional_access_allowed) is not bool:
+            raise ValueError("institutional access requires an explicit boolean authorization")
+        if academic_search_engine != "openalex":
+            raise ValueError("academic search currently supports OpenAlex only")
+        if general_search_engine not in {None, "tavily", "parallel", "disabled"}:
+            raise ValueError("unknown general search engine")
+        if general_search_engine == "disabled":
+            general_search_allowed = False
+        if not general_search_allowed and openalex_quota_policy in {"tavily", "parallel"}:
+            raise ValueError("本会议禁止通用搜索，不能预授权 Tavily 额度回退")
         if research_max_concurrent_claim_groups is not None:
             if not research_enabled or meeting_type != MeetingType.DELIBERATION:
                 raise ValueError("independent Research Desk parallelism requires a deliberation Research Desk")
@@ -520,6 +556,13 @@ class MeetingRepository:
                 private_registry_name = "identity_private/research_participants.json"
 
             repo = cls(staging)
+            from project_ensemble.storage.governance_snapshot import (
+                GOVERNANCE_SNAPSHOT, freeze_governance_docs,
+            )
+
+            frozen_governance = freeze_governance_docs(
+                governance_docs, staging / GOVERNANCE_SNAPSHOT,
+            )
             created_at = datetime.now(timezone.utc).isoformat()
             public_manifest = PublicMeetingManifest(
                 meeting_id=mid,
@@ -534,6 +577,10 @@ class MeetingRepository:
                 ),
                 audit_member_count=(len(public_participants) if meeting_type == MeetingType.AUDIT else None),
                 research_enabled=research_enabled,
+                general_search_allowed=general_search_allowed,
+                institutional_access_allowed=institutional_access_allowed,
+                academic_search_engine=academic_search_engine,
+                general_search_engine=general_search_engine,
                 planning_exploration_enabled=(
                     research_enabled and deliverable_type == DeliverableType.LITERATURE_REVIEW
                 ),
@@ -555,6 +602,10 @@ class MeetingRepository:
                 meeting_id=mid,
                 title=normalized_title,
                 created_at=created_at,
+                prompt_contract_version=CURRENT_PROMPT_CONTRACT_VERSION,
+                context_assembly_version=CURRENT_CONTEXT_ASSEMBLY_VERSION,
+                evidence_read_protocol_version=1,
+                evidence_read_round_limit=evidence_read_round_limit,
                 selected_models=selected_models,
                 chair_model=chair_model,
                 meeting_type=meeting_type,
@@ -570,7 +621,7 @@ class MeetingRepository:
                         else []
                     )
                 ),
-                governance_digest=directory_digest(governance_docs),
+                governance_digest=directory_digest(frozen_governance),
                 representative_prompt_family=(
                     "literature_research"
                     if deliverable_type == DeliverableType.LITERATURE_REVIEW
@@ -583,6 +634,10 @@ class MeetingRepository:
                 },
                 chair_reasoning_effort=chair_reasoning_effort,
                 research_enabled=research_enabled,
+                general_search_allowed=general_search_allowed,
+                institutional_access_allowed=institutional_access_allowed,
+                academic_search_engine=academic_search_engine,
+                general_search_engine=general_search_engine,
                 planning_exploration_enabled=(
                     research_enabled and deliverable_type == DeliverableType.LITERATURE_REVIEW
                 ),
@@ -722,6 +777,7 @@ class MeetingRepository:
                     config_sha256=hashlib.sha256(config_bytes).hexdigest(),
                     snapshot_path=str(config_snapshot),
                     governance_docs_path=str(Path(governance_docs).expanduser().resolve()),
+                    governance_snapshot_path=str(GOVERNANCE_SNAPSHOT),
                     model_config_path=(str(model_source) if model_source else None),
                     model_config_sha256=model_digest,
                     model_config_snapshot_path=(
@@ -741,6 +797,10 @@ class MeetingRepository:
                     "participant_count": len(public_participants),
                     "human_escalation_configured": escalation_email is not None,
                     "research_enabled": research_enabled,
+                    "general_search_allowed": general_search_allowed,
+                    "institutional_access_allowed": institutional_access_allowed,
+                    "academic_search_engine": academic_search_engine,
+                    "general_search_engine": general_search_engine,
                     "decision_rigor": decision_rigor.value,
                     "deliverable_type": deliverable_type.value,
                     "parent_meeting_id": parent_meeting_id,
@@ -802,7 +862,37 @@ class MeetingRepository:
         if not path.exists():
             raise ValueError("meeting does not record a configuration path; supply --config explicitly")
         data = json.loads(path.read_text(encoding="utf-8"))
-        return Path(data["config_path"])
+        source = Path(data["config_path"]).expanduser()
+        if source.is_file():
+            return source
+        # Relocation may remove the old source configuration. Use only the
+        # immutable, digest-checked copy inside this meeting in that case.
+        relative_name = data.get("snapshot_path")
+        expected_digest = data.get("config_sha256")
+        if not isinstance(relative_name, str) or not isinstance(expected_digest, str):
+            raise ValueError("recorded configuration is missing; supply --config explicitly")
+        relative = Path(relative_name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("invalid meeting configuration snapshot path")
+        snapshot = (self.root / relative).resolve()
+        if not snapshot.is_relative_to(self.root.resolve()) or not snapshot.is_file():
+            raise ValueError("recorded configuration snapshot is missing; supply --config explicitly")
+        if hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_digest:
+            raise ValueError("recorded configuration snapshot does not match its frozen digest")
+        model_name = data.get("model_config_snapshot_path")
+        model_digest = data.get("model_config_sha256")
+        if model_name is not None or model_digest is not None:
+            if not isinstance(model_name, str) or not isinstance(model_digest, str):
+                raise ValueError("incomplete frozen model configuration reference")
+            model_relative = Path(model_name)
+            if model_relative.is_absolute() or ".." in model_relative.parts:
+                raise ValueError("invalid model configuration snapshot path")
+            model_snapshot = (self.root / model_relative).resolve()
+            if not model_snapshot.is_relative_to(self.root.resolve()) or not model_snapshot.is_file():
+                raise ValueError("recorded model configuration snapshot is missing")
+            if hashlib.sha256(model_snapshot.read_bytes()).hexdigest() != model_digest:
+                raise ValueError("recorded model configuration snapshot does not match its frozen digest")
+        return snapshot
 
     @contextmanager
     def exclusive_run_lock(self):
@@ -888,6 +978,8 @@ def _verify_archived_parent_integrity(parent_root: Path, expected_meeting_id: st
     document = record.get("retained_document_path")
     if not isinstance(hashes, dict) or not isinstance(document, str) or document not in hashes:
         raise ValueError("归档会议缺少完整文稿或保留文件的校验信息")
+    from project_ensemble.storage.literature_zip_cache import effective_archive_hashes
+    hashes = effective_archive_hashes(parent_root, record)
     for relative_text, expected in hashes.items():
         if not isinstance(relative_text, str) or not isinstance(expected, str):
             raise ValueError("归档会议的文件校验记录格式无效")
@@ -901,7 +993,7 @@ def _verify_archived_parent_integrity(parent_root: Path, expected_meeting_id: st
             actual = hashlib.file_digest(handle, "sha256").hexdigest()
         if actual != expected:
             raise ValueError(f"归档会议文件校验失败：{relative_text}")
-    return record
+    return {**record, "retained_file_sha256": hashes}
 
 
 def _import_parent_meeting_assets(

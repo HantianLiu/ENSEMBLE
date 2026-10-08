@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-ensemble-v071"
-version = "0.7.3"
+version = "0.7.5"
 description = "Conservative governance and orchestration primitives for multi-model epistemic deliberation"
 readme = "README_v071.md"
 requires-python = ">=3.12"
@@ -31,7 +31,7 @@ ensemble-v071 = "project_ensemble.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-project_ensemble = ["assets/fonts/*.ttf", "assets/fonts/LICENSE.txt", "assets/reader_annotations.js", "assets/reader_annotations.css", "assets/reader_qa.html"]
+project_ensemble = ["assets/fonts/*.ttf", "assets/fonts/LICENSE.txt", "assets/reader_annotations.js", "assets/reader_markdown.js", "assets/reader_navigation.js", "assets/reader_focus.js", "assets/reader_annotations.css", "assets/reader_qa.html", "assets/skills/*/SKILL.md"]
 
 [tool.setuptools.data-files]
 "share/project-ensemble-v071" = ["README_v071.md", "README_v071.en.md", "THIRD_PARTY_NOTICES.md"]

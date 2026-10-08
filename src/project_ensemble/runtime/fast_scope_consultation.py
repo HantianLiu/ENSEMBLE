@@ -53,22 +53,45 @@ _STANDING_DELEGATION = Path("human_private/consultations/fast_scope_writer_stand
 
 
 def _standing_writer_delegation(repo) -> bool:
-    path = repo.root / _STANDING_DELEGATION
-    if not path.is_file():
-        return False
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return payload.get("authority") == "HUMAN" and payload.get("scope") == "FUTURE_FAST_SCOPE_ITEMS_IN_THIS_MEETING"
+    from project_ensemble.runtime.ai_delegation_settings import delegation_setting
+    return delegation_setting(repo, "fast_scope")[0]
 
 
 def _save_standing_writer_delegation(repo, issue_id: str) -> None:
+    from project_ensemble.runtime.ai_delegation_settings import set_delegation_settings
+    set_delegation_settings(repo, {"fast_scope": True})
     payload = {
         "authority": "HUMAN",
         "scope": "FUTURE_FAST_SCOPE_ITEMS_IN_THIS_MEETING",
         "starting_issue_id": issue_id,
         "effect": "WRITER_DECIDES_EACH_ITEM;APPROVED_TASKBOOK_REMAINS_SOURCE",
     }
-    repo.docs.write_once(_STANDING_DELEGATION, json.dumps(payload, ensure_ascii=False, indent=2))
+    if not (repo.root / _STANDING_DELEGATION).is_file():
+        repo.docs.write_once(_STANDING_DELEGATION, json.dumps(payload, ensure_ascii=False, indent=2))
     repo.events.append("FAST_SCOPE_WRITER_STANDING_DELEGATION_GRANTED", payload, actor="HUMAN")
+
+
+def try_automatic_fast_scope(repo, issue, *, engine, max_output_tokens=None):
+    """Reuse the existing itemized scope protocol when the meeting grants authority."""
+    import sys
+    if issue.stage != "FAST_SCOPE_QUESTION" or engine is None or not _standing_writer_delegation(repo):
+        return None
+    fallback = Path("public/procedural_consultations") / f"{issue.issue_id}.ai_scope_automatic_fallback.json"
+    if (repo.root / fallback).is_file():
+        return None
+    # No inferred Human answer: any manual choice or failed model call returns
+    # to the original consultation. Fully delegated items submit themselves.
+    completed = prompt_fast_scope_consultation(
+        repo, issue, input_fn=lambda _prompt: "", output=sys.stderr,
+        engine=engine, max_output_tokens=max_output_tokens,
+    )
+    if completed:
+        return HumanConsultationService(repo).resolution(issue.issue_id)
+    payload = {"meeting_id": repo.meeting_id, "issue_id": issue.issue_id,
+               "effect": "MANUAL_RECOVERY;NO_AUTOMATIC_RETRY_OF_THIS_ISSUE"}
+    repo.docs.write_once(fallback, json.dumps(payload, ensure_ascii=False, indent=2))
+    repo.events.append("FAST_SCOPE_AI_AUTOMATIC_FALLBACK", payload, actor="orchestrator")
+    return None
 
 
 def _effective_decision_path(repo, issue_id: str, index: int) -> Path | None:
@@ -251,9 +274,12 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                       f"The earlier decision for item {index} was withdrawn; please answer again."),
                   file=output)
         authorization_path = _record_path(issue.issue_id, index, "delegation")
+        automatic_blocked = (repo.root / "public/procedural_consultations" /
+                             f"{issue.issue_id}.ai_scope_automatic_fallback.json").is_file()
         delegated = (
             ((repo.root / authorization_path).is_file() or _standing_writer_delegation(repo))
             and not (repo.root / _record_path(issue.issue_id, index, "delegation_override")).is_file()
+            and not automatic_blocked
         )
         print(_ui(f"\n┌─ {issue.context.get('module_id', '')} · 范围问题 {index}/{len(items)} ──",
                   f"\n┌─ {issue.context.get('module_id', '')} · scope item {index}/{len(items)} ──"), file=output)
@@ -264,8 +290,10 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
         print(_ui("问题：", "Question: ") + item["question"], file=output)
         proposed = item["proposal"]
         advice = None
+        advice_failure = None
         advice_path = repo.root / _record_path(issue.issue_id, index, "writer_advice")
-        if not proposed and (engine is not None or advice_path.is_file()):
+        if (not proposed and (engine is not None or advice_path.is_file())
+                and (not automatic_blocked or advice_path.is_file())):
             try:
                 if not advice_path.is_file():
                     print(_ui(
@@ -277,6 +305,7 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                 proposed = (advice.new_scope if advice.decision == "CHANGE" else
                             _ui("学术主笔建议维持原范围：", "Writer recommends keeping the approved scope: ") + advice.rationale)
             except Exception as exc:
+                advice_failure = f"{type(exc).__name__}: {exc}"
                 print(_ui(f"学术主笔暂未给出拟议范围（{exc}）；你仍可直接决定。",
                           f"Writer advice is unavailable ({exc}); you can still decide directly."), file=output)
         proposed = proposed or _ui(
@@ -306,6 +335,7 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
             while True:
                 print(_ui("1. 修改范围（输入具体改动）  2. 不修改，维持已批准范围  3. 交学术主笔裁定",
                           "1. Change scope (enter wording)  2. Keep approved scope  3. Let the writer decide"), file=output)
+                print(_ui("g. 会议设置 · AI 代裁开关", "g. Meeting settings · AI delegation switches"), file=output)
                 if index > 1:
                     print(_ui("4. 本条已由前一条覆盖；不重复增加范围",
                               "4. Already covered by the previous item; do not add scope twice"), file=output)
@@ -325,6 +355,13 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                     return False
                 if choice == "":
                     return False
+                if choice.lower() == "g":
+                    from project_ensemble.cli import _interactive_ai_delegation_settings
+                    _interactive_ai_delegation_settings(repo, input_fn=input_fn, output=output)
+                    return prompt_fast_scope_consultation(
+                        repo, issue, input_fn=input_fn, output=output, engine=engine,
+                        max_output_tokens=max_output_tokens,
+                    )
                 if choice.lower() == "u" and index > 1:
                     withdraw_fast_scope_item(
                         repo, issue.issue_id, index - 1,
@@ -435,8 +472,10 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                 break
         if delegated:
             while True:
-                failure = None
-                if engine is None:
+                failure = advice_failure
+                if failure is not None:
+                    pass
+                elif engine is None:
                     failure = _ui("当前入口无法调用学术主笔", "The writer is unavailable in this entry point")
                 else:
                     try:
@@ -467,6 +506,7 @@ def prompt_fast_scope_consultation(repo, issue, *, input_fn, output,
                 except (EOFError, KeyboardInterrupt):
                     return False
                 if engine is not None and recovery == "1":
+                    advice_failure = None
                     continue
                 if recovery == ("2" if engine is not None else "1"):
                     while True:

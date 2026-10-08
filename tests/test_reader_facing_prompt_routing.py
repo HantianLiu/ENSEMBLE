@@ -5,9 +5,14 @@ from project_ensemble.orchestration.literature_report_execution import (
     GlobalEvidenceSummary, LiteratureReportExecutionRunner, ModuleDraft,
     WholeReportSynthesis,
 )
-from project_ensemble.orchestration.literature_fast import FastBreadthSearchPlan, FastWholeSynthesis
+from project_ensemble.orchestration.literature_fast import (
+    FastBreadthSearchPlan, FastWholeSynthesis, FastLocalScienceRepair,
+)
+from project_ensemble.orchestration.math_output_prompt import MATH_OUTPUT_FORMAT_RULES
+from project_ensemble.orchestration.math_integrity import FORMULA_BOOKKEEPING_RULES
 from project_ensemble.orchestration.literature_writing_v071 import (
     ModuleWritingOutline, OutlineBallot, WriterChapter,
+    ScienceChecklist,
 )
 from project_ensemble.orchestration.readability_policy import reader_facing_prose_contract
 from project_ensemble.orchestration.scholarly_rendering import (
@@ -62,18 +67,21 @@ def test_literature_direct_prose_calls_receive_contract_but_evidence_summary_doe
     runner.engine, calls = _capture_engine()
     runner.max_output_tokens = None
 
-    for schema in (ModuleDraft, WholeReportSynthesis, FastWholeSynthesis, WriterChapter):
+    for schema in (ModuleDraft, WholeReportSynthesis, FastWholeSynthesis, WriterChapter,
+                   FastLocalScienceRepair):
         runner._invoke_service("WRITER", stage="test", schema=schema,
                                system="原阶段权限。", user={})
     runner._invoke_service("RESEARCH_DESK", stage="test", schema=GlobalEvidenceSummary,
                            system="证据摘要。", user={})
 
-    for call in calls[:4]:
+    for call in calls[:5]:
+        assert MATH_OUTPUT_FORMAT_RULES in call["system_text"]
         assert "读者正文写作契约" in call["system_text"]
         assert '"药学"' in call["system_text"]
         assert '"ordinary_level":3' in call["system_text"]
         assert "不得原样搬入正文" in call["system_text"]
-    assert calls[4]["system_text"] == "证据摘要。"
+        assert "公式表每项应能独立理解" in call["system_text"]
+    assert calls[5]["system_text"] == "证据摘要。"
 
 
 def test_legacy_representative_writer_receives_contract(tmp_path):
@@ -91,6 +99,37 @@ def test_legacy_representative_writer_receives_contract(tmp_path):
         public_files=(), user_prefix="撰写导读。",
     )
     assert "读者正文写作契约" in calls[0]["user_text"]
+    assert MATH_OUTPUT_FORMAT_RULES in calls[0]["user_text"]
+    assert FORMULA_BOOKKEEPING_RULES in calls[0]["user_text"]
+
+
+def test_librarian_uses_existing_review_call_for_notation_and_format_notes(tmp_path):
+    runner = object.__new__(LiteratureReportExecutionRunner)
+    runner.repo = SimpleNamespace(root=tmp_path)
+    runner.engine, calls = _capture_engine()
+    runner.max_output_tokens = None
+    runner._invoke_service("R-ONE", stage="fast_science_review_RM-02_v1",
+                           schema=ScienceChecklist, system="原科学审阅权限。",
+                           user={"chapter": {"body_markdown": r"\(\nu\)"}})
+    assert len(calls) == 1
+    assert FORMULA_BOOKKEEPING_RULES in calls[0]["system_text"]
+    assert "notation_reference" in calls[0]["user_text"]
+    assert "formula_format_notes" in calls[0]["user_text"]
+    assert '\n  "chapter"' not in calls[0]["user_text"]
+
+
+def test_local_revision_receives_same_round_notation_rules_without_extra_role_call(tmp_path):
+    runner = object.__new__(LiteratureReportExecutionRunner)
+    runner.repo = SimpleNamespace(root=tmp_path)
+    runner.engine, calls = _capture_engine()
+    runner.max_output_tokens = None
+    runner._invoke_service("WRITER", stage="fast_local_science_repair_RM-02_v2",
+                           schema=FastLocalScienceRepair, system="只修改当前异议。",
+                           user={"numbered_objections": [{"number": 1, "objection": "符号冲突"}]})
+    assert len(calls) == 1
+    assert "同步维护公式格式和符号" in calls[0]["system_text"]
+    assert "notation_reference" in calls[0]["user_text"]
+    assert "符号冲突" in calls[0]["user_text"]
 
 
 def test_planning_structured_calls_receive_scoped_prose_and_authority_rules(tmp_path):
@@ -134,6 +173,7 @@ def test_scholarly_rendering_prose_and_revisions_receive_contract_only(tmp_path)
         runner._invoke("CHAIR", stage="test", schema=schema,
                        system="冻结原文不可改变。", user={})
     for call in calls[:2]:
+        assert MATH_OUTPUT_FORMAT_RULES in call["system_text"]
         assert "读者正文写作契约" in call["system_text"]
         assert '"level":2' in call["system_text"]
     assert calls[2]["system_text"] == "冻结原文不可改变。"

@@ -218,7 +218,8 @@ def test_round_releases_one_snapshot_and_injects_it_into_later_context(tmp_path)
     assert data["status"] == "RELEASED"
     assert data["packet_ids"] == result.packet_ids
     assert data["packets"][0]["normalized_claim"].startswith("The bounded result")
-    assert (repo.root / "public/research/literature_bundle.zip").exists()
+    assert (repo.root / "public/research/literature_bundle/manifest.json").exists()
+    assert not (repo.root / "public/research/literature_bundle.zip").exists()
     assert repo.events.verify()
 
     registry = json.loads(

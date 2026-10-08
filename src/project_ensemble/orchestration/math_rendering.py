@@ -617,12 +617,14 @@ def display_math_continue(line: str, closing: str) -> tuple[str, bool]:
 
 
 def repair_nested_display_fences(markdown: str) -> str:
-    """Remove a redundant display wrapper around a complete one-line equation.
+    """Remove redundant display wrappers without swallowing explanatory prose.
 
-    Some drafts emit ``$$ / $$equation$$ / explanatory prose / $$``.  Treating
-    the outer pair as TeX swallows the prose (and sometimes following lists).
-    Only this narrow, unambiguous presentation defect is repaired; the frozen
-    Markdown remains untouched.
+    Some drafts emit ``$$ / $$equation$$ / explanatory prose / $$``, or
+    ``$$ / $$ / equation / $$ / explanatory prose / $$``. Treating
+    the wrapper as TeX swallows prose and leaves the real equation in Markdown.
+    Repair only a complete inner equation with trailing explanation, bounded by
+    the next list/heading/code fence. Strip nested inline delimiters only inside
+    a recognized display formula. The frozen Markdown remains untouched.
     """
     lines = markdown.splitlines(keepends=True)
     repaired: list[str] = []
@@ -634,6 +636,33 @@ def repair_nested_display_fences(markdown: str) -> str:
             in_fence = not in_fence
         if not in_fence and line.strip() == "$$" and index + 3 < len(lines):
             inner = lines[index + 1].strip()
+            if inner == "$$":
+                # A duplicated opening fence: find the inner close, then an
+                # outer close after explanation, without crossing a new item.
+                candidates: list[int] = []
+                for cursor in range(index + 2, min(index + 82, len(lines))):
+                    text = lines[cursor].strip()
+                    if text.startswith(("#", "- ", "* ", "```", "~~~")):
+                        break
+                    if text == "$$":
+                        candidates.append(cursor)
+                        if len(candidates) == 2:
+                            break
+                if len(candidates) == 2:
+                    inner_close, outer_close = candidates
+                    formula = "".join(lines[index + 2:inner_close]).strip()
+                    prose = "".join(lines[inner_close + 1:outer_close]).strip()
+                    # A math command/relation and an explanation are required;
+                    # never reinterpret empty or arbitrary paired fences.
+                    if (formula and prose and (
+                            _EQUATION_RELATION.search(formula) or re.search(r"\\[A-Za-z]+", formula))
+                            and not re.search(r"[\u3400-\u9fff]", formula)
+                            and (r"\(" in prose or re.search(r"[\u3400-\u9fff]", prose))):
+                        repaired.extend([lines[index + 1], *lines[index + 2:inner_close],
+                                         lines[inner_close], "\n",
+                                         *lines[inner_close + 1:outer_close], "\n"])
+                        index = outer_close + 1
+                        continue
             if (inner.startswith("$$") and inner.endswith("$$")
                     and len(inner) > 4 and "$$" not in inner[2:-2]):
                 closing = next(
@@ -650,7 +679,48 @@ def repair_nested_display_fences(markdown: str) -> str:
                     continue
         repaired.append(line)
         index += 1
-    return "".join(repaired)
+    # Inline delimiters nested in an already-delimited display formula are not
+    # TeX grouping; their removal preserves every symbol and its ordering.
+    output: list[str] = []
+    closing: str | None = None
+    in_fence = False
+    for line in repaired:
+        if re.match(r"^\s*(?:```|~~~)", line):
+            in_fence = not in_fence
+        if in_fence:
+            output.append(line)
+            continue
+        if closing is not None:
+            is_closed = display_math_continue(line, closing)[1]
+            output.append(re.sub(r"\\\((.*?)\\\)", r"\1", line))
+            if is_closed:
+                closing = None
+            continue
+        display = display_math_start(line)
+        if display:
+            delimiter, _content, closed = display
+            output.append(re.sub(r"\\\((.*?)\\\)", r"\1", line))
+            if not closed:
+                closing = delimiter
+        else:
+            output.append(line)
+    return "".join(output)
+
+
+def glossary_formula_markdown(fragment: str) -> str:
+    """Keep existing equation/prose boundaries instead of wrapping the whole field."""
+    fragment = repair_nested_display_fences(fragment.strip())
+    if any(display_math_start(line) for line in fragment.splitlines()):
+        return fragment
+    if fragment.startswith(r"\(") and fragment.endswith(r"\)") and fragment.count(r"\(") == 1:
+        fragment = fragment[2:-2]
+    # Formula fields sometimes also contain explanations. Do not put Chinese
+    # prose in a display-math wrapper; existing inline math remains Markdown.
+    outside_math = re.sub(INLINE_MATH_TOKEN, "", fragment)
+    outside_math = re.sub(r"\\(?:text|mathrm)\{[^{}]*\}", "", outside_math)
+    if re.search(r"[\u3400-\u9fff]", outside_math):
+        return fragment
+    return repair_nested_display_fences("$$\n" + fragment + "\n$$")
 
 
 def safe_pdf_font_grouping_repair(formula: str) -> str | None:

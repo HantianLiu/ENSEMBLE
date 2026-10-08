@@ -47,12 +47,28 @@ enabled = false
 base_url = "https://api.tavily.com"
 api_key_env = "TAVILY_API_KEY"
 # api_key_file = "~/.config/secrets/tavily.sh"
-search_depth = "advanced"
+# Explicit low-cost search; auto_parameters is always false in the adapter.
+# Advanced search is opt-in and costs twice as many Search API credits.
+search_depth = "basic"
+extract_enabled = false # Paid webpage extraction is explicit opt-in.
 max_results_per_query = 8
 chunks_per_source = 3
 
 # Optional human-escalation email. When enabled, ENSEMBLE submits a minimal
 # Slurm job and lets the scheduler send its completion notification.
+
+# Configure both providers if desired; each meeting chooses one or disables
+# general search. Parallel paid Extract is not used.
+[research.parallel]
+enabled = false
+base_url = "https://api.parallel.ai"
+api_key_env = "PARALLEL_API_KEY"
+# api_key_file = "~/.config/secrets/parallel.sh"
+mode = "fast" # Only fast and turbo are accepted; never implicit advanced.
+max_results_per_query = 10 # Hard cap: 1–10, to avoid per-extra-result charges.
+max_chars_total = 20000
+max_concurrent_requests = 4
+
 [notifications.email]
 enabled = false
 transport = "slurm"

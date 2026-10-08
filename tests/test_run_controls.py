@@ -64,3 +64,20 @@ def test_openalex_quota_policy_can_override_an_existing_meeting_without_rewritin
         reason="人类恢复等待 OpenAlex 重置",
     )
     assert effective_openalex_quota_policy(repo, "legacy_parallel") == "wait"
+
+
+def test_runtime_control_does_not_require_human_reason(tmp_path):
+    governance = tmp_path / "governance"
+    governance.mkdir()
+    (governance / "rule.md").write_text("rule", encoding="utf-8")
+    repo = MeetingRepository.create(
+        tmp_path / "meeting", selected_models=[("fake", "m")],
+        chair_model=("fake", "m"), governance_docs=governance,
+    )
+    record = record_run_control(
+        repo, kind="research_parallelism", target=None, value=16,
+    )
+    assert record["reason"] is None
+    assert record["authority"] == "HUMAN"
+    assert effective_research_parallelism(repo, None) == 16
+    assert repo.events.verify()

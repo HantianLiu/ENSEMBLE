@@ -1386,6 +1386,16 @@ class ConsoleProgressReporter:
             if self._fast_workflow_stage == step:
                 return
             self._clear_live_table_locked()
+            # Resuming a fast meeting can replay already-frozen planning and
+            # research stages without making another model call.  The next
+            # stage must not inherit their last module or task batch: a later
+            # science-review call would otherwise appear under that old row.
+            self._rendering_step = None
+            self._tasks.clear()
+            self._batch_title = None
+            self._live_note = None
+            self._status_context = None
+            self._exploration_layout = False
             self._fast_workflow_stage = step
             self._render_live_table_locked(force=True)
 

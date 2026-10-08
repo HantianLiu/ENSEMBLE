@@ -7,7 +7,7 @@ from project_ensemble import __version__
 def test_release_has_canonical_and_compatibility_console_entry_points():
     root = Path(__file__).resolve().parents[1]
     metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert __version__ == metadata["project"]["version"] == "0.7.3"
+    assert __version__ == metadata["project"]["version"] == "0.7.5"
     assert metadata["project"]["scripts"] == {
         "ensemble": "project_ensemble.cli:main",
         "ensemble-v071": "project_ensemble.cli:main",

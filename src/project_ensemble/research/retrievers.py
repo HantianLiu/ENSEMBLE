@@ -75,9 +75,9 @@ class ResearchRetriever(Protocol):
 
 
 class PolicyResearchRetriever:
-    """Route academic search to OpenAlex; use Tavily as a bounded fallback.
+    """Route academic search to OpenAlex; paid fallback needs authorization.
 
-    General-web claims use Tavily as their primary source, not as an OpenAlex
+    General-web claims use the selected web engine, not as an OpenAlex
     substitute. The distinction preserves official-document discovery while
     preventing an OpenAlex quota event from silently downgrading scholarship.
     """
@@ -86,10 +86,12 @@ class PolicyResearchRetriever:
 
     def __init__(self, openalex: ResearchRetriever, tavily: ResearchRetriever,
                  *, quota_policy: str = "wait"):
-        if quota_policy not in {"wait", "tavily"}:
+        if quota_policy not in {"wait", "tavily", "parallel"}:
             raise ValueError("unknown OpenAlex quota policy")
         self.openalex = openalex
-        self.tavily = tavily
+        self.tavily = tavily  # Legacy attribute; the selected backend can be Parallel.
+        self.general_backend_id = getattr(tavily, "backend_ids", ("tavily",))[0]
+        self.backend_ids = ("openalex", self.general_backend_id)
         self.retrievers = (openalex, tavily)
         self.quota_policy = quota_policy
         self._openalex_suspended_until = 0.0
@@ -107,12 +109,12 @@ class PolicyResearchRetriever:
     def retrieve(self, claim: NormalizedClaim) -> ResearchRetrievalResult:
         if claim.source_domain != ClaimSourceDomain.ACADEMIC:
             return self._with_fallback(self.tavily, self.openalex, claim)
-        if self.quota_policy == "tavily" and self.openalex_suspended():
+        if self.quota_policy in {"tavily", "parallel"} and self.openalex_suspended():
             return self._fallback(
                 self.tavily.retrieve(claim), "openalex",
                 OpenAlexDailyQuotaExhausted(
                     "OpenAlex HTTP 429 daily quota previously confirmed; "
-                    "Human authorized Tavily until reset",
+                    "Human authorized selected general search until reset",
                     reset_seconds=max(0.0, self._openalex_suspended_until - time.monotonic()),
                 ),
             )
@@ -122,12 +124,12 @@ class PolicyResearchRetriever:
         # Broad exploration needs both scholarly and web coverage when both
         # backends are healthy; quota-wait policy still forbids silently
         # publishing a Tavily-only response for an OpenAlex search.
-        if self.quota_policy == "tavily" and self.openalex_suspended():
+        if self.quota_policy in {"tavily", "parallel"} and self.openalex_suspended():
             return self._fallback(
                 self.tavily.retrieve_exploratory(query), "openalex",
                 OpenAlexDailyQuotaExhausted(
                     "OpenAlex HTTP 429 daily quota previously confirmed; "
-                    "Human authorized Tavily until reset",
+                    "Human authorized selected general search until reset",
                     reset_seconds=max(0.0, self._openalex_suspended_until - time.monotonic()),
                 ),
             )
@@ -144,13 +146,15 @@ class PolicyResearchRetriever:
                 raise
             return self._fallback(self.tavily.retrieve_exploratory(query), "openalex", exc)
         except OpenAlexConnectionUnavailable as exc:
+            if self.quota_policy == "wait":
+                raise  # No automatic paid academic fallback without authorization.
             return self._fallback(self.tavily.retrieve_exploratory(query), "openalex", exc)
         if academic_only:
             return academic
         try:
             web = self.tavily.retrieve_exploratory(query)
         except TransientProviderError as exc:
-            return self._fallback(academic, "tavily", exc)
+            return self._fallback(academic, self.general_backend_id, exc)
         return self._merge(academic, web)
 
     def _with_fallback(self, primary: ResearchRetriever, fallback: ResearchRetriever,
@@ -168,11 +172,13 @@ class PolicyResearchRetriever:
                 raise
             return self._fallback(fallback.retrieve(claim), "openalex", exc)
         except OpenAlexConnectionUnavailable as exc:
+            if self.quota_policy == "wait":
+                raise  # No automatic paid academic fallback without authorization.
             return self._fallback(fallback.retrieve(claim), "openalex", exc)
         except TransientProviderError as exc:
             if primary is self.openalex:
                 raise  # A transient 429 is not a connectivity failure.
-            return self._fallback(fallback.retrieve(claim), "tavily", exc)
+            return self._fallback(fallback.retrieve(claim), self.general_backend_id, exc)
 
     @staticmethod
     def _retry_openalex_connection(call):
@@ -317,7 +323,7 @@ class CompositeRetriever:
         failed: list[str] = []
         retrievers = tuple(
             retriever for retriever in self.retrievers
-            if not (academic_only and isinstance(retriever, TavilyRetriever))
+            if not (academic_only and set(getattr(retriever, "backend_ids", ())) <= {"tavily", "parallel"})
         )
         if not retrievers:
             raise TransientProviderError("academic exploratory search has no scholarly backend")
@@ -376,7 +382,8 @@ class TavilyRetriever:
         api_key: str,
         base_url: str = "https://api.tavily.com",
         timeout_seconds: float = 30.0,
-        search_depth: str = "advanced",
+        search_depth: str = "basic",
+        extract_enabled: bool = False,
         max_results_per_query: int = 8,
         chunks_per_source: int = 3,
         max_concurrent_requests: int = 4,
@@ -387,6 +394,7 @@ class TavilyRetriever:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.search_depth = search_depth
+        self.extract_enabled = extract_enabled
         self.max_results_per_query = max_results_per_query
         self.chunks_per_source = chunks_per_source
         self._request_gate = threading.BoundedSemaphore(max_concurrent_requests)
@@ -438,6 +446,8 @@ class TavilyRetriever:
                 {
                     "backend_id": "tavily",
                     "purpose": purpose,
+                    "search_depth": self.search_depth,
+                    "auto_parameters": False,
                     "query": query,
                     "returned_source_ids": returned_ids,
                     "provider_request_id": data.get("request_id"),
@@ -466,6 +476,8 @@ class TavilyRetriever:
             query_trace=[{
                 "backend_id": "tavily",
                 "purpose": "exploratory",
+                "search_depth": self.search_depth,
+                "auto_parameters": False,
                 "query": query,
                 "returned_source_ids": list(candidates),
                 "provider_usage": data.get("usage"),

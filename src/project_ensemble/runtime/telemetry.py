@@ -22,6 +22,12 @@ class TokenTelemetry(BaseModel):
     reasoning_tokens: int | None = None
     total_tokens: int | None = None
     cache_hit_rate: float | None = None
+    # Estimates and fingerprints are separate from provider-reported usage.
+    system_characters: int | None = None
+    user_characters: int | None = None
+    estimated_input_tokens: int | None = None
+    system_sha256: str | None = None
+    request_sha256: str | None = None
 
 
 def _integer(mapping: dict[str, Any], *keys: str) -> int | None:

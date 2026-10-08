@@ -28,6 +28,18 @@
       "default": null,
       "title": "Governance Docs Path"
     },
+    "governance_snapshot_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Governance Snapshot Path"
+    },
     "model_config_path": {
       "anyOf": [
         {

@@ -20,6 +20,7 @@ from project_ensemble.user_settings import (
     save_appearance, save_freshness_preset, settings_dir, store_secret,
     save_search_backends, interface_language, save_interface_language,
     update_provider, remove_provider, replace_managed_secret, removed_provider_ids,
+    hidden_model_ids, set_model_visibility,
 )
 
 
@@ -77,6 +78,83 @@ def test_provider_management_updates_and_removes_catalog_entries(isolated_settin
     remove_provider("lithos")
     assert "lithos" not in load_config(config_path).providers
     assert "lithos" in removed_provider_ids()
+
+
+def test_hidden_models_are_user_scoped_and_can_be_updated_in_batches(isolated_settings):
+    set_model_visibility("siliconflow", ["Qwen/Qwen3-8B", "deepseek-ai/DeepSeek-V4"], hidden=True)
+    assert hidden_model_ids("siliconflow") == {"Qwen/Qwen3-8B", "deepseek-ai/DeepSeek-V4"}
+    set_model_visibility("siliconflow", ["deepseek-ai/DeepSeek-V4"], hidden=False)
+    assert hidden_model_ids("siliconflow") == {"Qwen/Qwen3-8B"}
+    assert hidden_model_ids("other") == set()
+    assert "Qwen/Qwen3-8B" in (settings_dir() / "hidden_models.toml").read_text(encoding="utf-8")
+
+
+def test_model_visibility_batch_accepts_range_and_chinese_separators(isolated_settings):
+    from project_ensemble.user_settings import _select_model_visibility_batch
+
+    answers = iter(["", "1-2，4"])
+    wizard = SimpleNamespace(input=lambda _prompt: next(answers))
+    _select_model_visibility_batch(
+        wizard, provider_id="lab", model_ids=["a", "b", "c", "d"],
+        hide=True, t=lambda zh, en: zh, output=io.StringIO(),
+    )
+    assert hidden_model_ids("lab") == {"a", "b", "d"}
+
+
+def test_model_visibility_manager_supports_multiple_hide_rounds_and_expanded_restore_panel(
+    isolated_settings, monkeypatch,
+):
+    add_provider("lab", ProviderConfig(
+        kind="openai_compatible", display_name="Lab",
+        base_url="https://example.test/v1", api_key_env="LAB_API_KEY",
+    ))
+    catalog = [
+        SimpleNamespace(model_id="deepseek-ai/DeepSeek-V4-Flash"),
+        SimpleNamespace(model_id="Qwen/Qwen3-8B"),
+    ]
+    monkeypatch.setattr(
+        "project_ensemble.startup.discover_models",
+        lambda config, providers, include_hidden=False: catalog,
+    )
+    choices = iter(["provider", "manage", "lab", "models", "hide", "hide", "expand", "back"])
+    answers = iter(["DeepSeek", "1", "Qwen", "1", "DeepSeek", "1"])
+    wizard = SimpleNamespace(
+        output=io.StringIO(), language="en",
+        _choose_one=lambda _title, _options: next(choices),
+        input=lambda _prompt: next(answers),
+    )
+
+    configure_interactively(wizard)
+
+    assert hidden_model_ids("lab") == {"Qwen/Qwen3-8B"}
+    assert "live models" in wizard.output.getvalue()
+    assert "Hidden models" in wizard.output.getvalue()
+
+
+def test_saved_hidden_models_can_be_restored_after_configuration_when_provider_is_offline(
+    isolated_settings, monkeypatch,
+):
+    add_provider("lab", ProviderConfig(
+        kind="openai_compatible", display_name="Lab",
+        base_url="https://example.test/v1", api_key_env="LAB_API_KEY",
+    ))
+    set_model_visibility("lab", ["retired-model"], hidden=True)
+    monkeypatch.setattr(
+        "project_ensemble.startup.discover_models",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline in test")),
+    )
+    choices = iter(["provider", "manage", "lab", "models", "expand", "back"])
+    answers = iter(["retired", "1"])
+    wizard = SimpleNamespace(
+        output=io.StringIO(), language="en",
+        _choose_one=lambda _title, _options: next(choices),
+        input=lambda _prompt: next(answers),
+    )
+
+    configure_interactively(wizard)
+
+    assert hidden_model_ids("lab") == set()
+    assert "live catalog is unavailable" in wizard.output.getvalue()
 
 
 def test_provider_settings_menu_can_rename_existing_provider(isolated_settings):
@@ -166,16 +244,38 @@ def test_search_backend_settings_preserve_external_key_references(isolated_setti
     assert "academic-key" not in path.read_text(encoding="utf-8")
 
 
+def test_parallel_settings_round_trip_and_existing_configuration_is_preserved(isolated_settings, tmp_path, monkeypatch):
+    monkeypatch.delenv("MY_PARALLEL_KEY", raising=False)
+    key = tmp_path / "parallel-key.sh"
+    key.write_text("MY_PARALLEL_KEY='fixture-secret'\n", encoding="utf-8")
+    path = save_search_backends(
+        openalex_email=None, parallel_enabled=True,
+        parallel_key_env="MY_PARALLEL_KEY", parallel_key_file=str(key), parallel_mode="turbo",
+    )
+    cfg = load_config(path)
+    assert cfg.research.parallel.enabled
+    assert cfg.research.parallel.mode == "turbo"
+    assert cfg.research.parallel.max_results_per_query == 10
+    assert cfg.research.parallel.api_key() == "fixture-secret"
+    assert "fixture-secret" not in path.read_text()
+    save_search_backends(openalex_email=None, tavily_enabled=True)
+    assert load_config(path).research.parallel.mode == "turbo"
+
+
 def test_anonymous_openalex_does_not_inherit_existing_global_key(isolated_settings, monkeypatch):
     monkeypatch.setenv("OPENALEX_API_KEY", "should-not-be-used")
     path = save_search_backends(openalex_email=None, openalex_key_env="")
     assert load_config(path).research.openalex_api_key() is None
 
 
-def test_wizard_can_reference_external_key_without_copying_it(isolated_settings, tmp_path):
+def test_wizard_can_reference_external_key_without_copying_it(isolated_settings, tmp_path, monkeypatch):
     external = tmp_path / "external.sh"
     external.write_text("REMOTE_API_KEY='external-secret'\n", encoding="utf-8")
-    options = iter(["provider", "add", "openai_compatible", "file"])
+    monkeypatch.setattr(
+        "project_ensemble.startup.discover_models",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline in test")),
+    )
+    options = iter(["provider", "add", "openai_compatible", "file", "back"])
     answers = iter(["实验网关", "lab", "https://gateway.example/v1", "REMOTE_API_KEY", str(external)])
     wizard = SimpleNamespace(
         output=io.StringIO(), _choose_one=lambda _title, _options: next(options),
@@ -191,7 +291,11 @@ def test_wizard_can_reference_external_key_without_copying_it(isolated_settings,
 
 def test_wizard_adds_lithosai_preset_without_manual_toml(isolated_settings, monkeypatch):
     monkeypatch.setenv("LITHOSAI_API_KEY", "test-key")
-    choices = iter(["provider", "add", "lithosai", "env"])
+    monkeypatch.setattr(
+        "project_ensemble.startup.discover_models",
+        lambda *args, **kwargs: [SimpleNamespace(model_id="mock-model")],
+    )
+    choices = iter(["provider", "add", "lithosai", "env", "back"])
     wizard = SimpleNamespace(
         output=io.StringIO(),
         _choose_one=lambda _title, _options: next(choices),
@@ -205,6 +309,29 @@ def test_wizard_adds_lithosai_preset_without_manual_toml(isolated_settings, monk
     assert provider.base_url == "https://api.lithosai.cloud/v1"
     assert provider.api_key_env == "LITHOSAI_API_KEY"
     assert provider.api_key() == "test-key"
+
+
+def test_wizard_adds_siliconflow_with_model_scoped_reasoning_effort(isolated_settings, monkeypatch):
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "project_ensemble.startup.discover_models",
+        lambda *args, **kwargs: [SimpleNamespace(model_id="deepseek-ai/DeepSeek-V4-Flash")],
+    )
+    choices = iter(["provider", "add", "siliconflow", "env", "back"])
+    wizard = SimpleNamespace(
+        output=io.StringIO(), language="en",
+        _choose_one=lambda _title, _options: next(choices),
+    )
+
+    path = configure_interactively(wizard)
+    provider = load_config(path).providers["siliconflow"]
+
+    assert provider.base_url == "https://api.siliconflow.cn/v1"
+    assert provider.api_key_env == "SILICONFLOW_API_KEY"
+    assert provider.reasoning_effort_map == {"high": "xhigh"}
+    assert provider.supports_reasoning_effort("deepseek-ai/DeepSeek-V4-Flash", "high")
+    assert not provider.supports_reasoning_effort("Qwen/Qwen3-8B", "high")
+    assert "Fetching this provider's current model catalog" in wizard.output.getvalue()
 
 
 def test_claude_code_requires_explicit_model_list():

@@ -119,7 +119,7 @@
       "type": "string"
     },
     "software_version": {
-      "default": "0.7.3",
+      "default": "0.7.5",
       "title": "Software Version",
       "type": "string"
     },
@@ -127,6 +127,34 @@
       "default": "0.7.1",
       "title": "Governance Version",
       "type": "string"
+    },
+    "prompt_contract_version": {
+      "default": 1,
+      "maximum": 3,
+      "minimum": 1,
+      "title": "Prompt Contract Version",
+      "type": "integer"
+    },
+    "context_assembly_version": {
+      "default": 1,
+      "maximum": 3,
+      "minimum": 1,
+      "title": "Context Assembly Version",
+      "type": "integer"
+    },
+    "evidence_read_protocol_version": {
+      "default": 0,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Evidence Read Protocol Version",
+      "type": "integer"
+    },
+    "evidence_read_round_limit": {
+      "default": 8,
+      "maximum": 32,
+      "minimum": 1,
+      "title": "Evidence Read Round Limit",
+      "type": "integer"
     },
     "representative_prompt_family": {
       "default": "legacy_shared",
@@ -157,6 +185,39 @@
       "default": false,
       "title": "Research Enabled",
       "type": "boolean"
+    },
+    "general_search_allowed": {
+      "default": true,
+      "title": "General Search Allowed",
+      "type": "boolean"
+    },
+    "institutional_access_allowed": {
+      "default": false,
+      "title": "Institutional Access Allowed",
+      "type": "boolean"
+    },
+    "academic_search_engine": {
+      "const": "openalex",
+      "default": "openalex",
+      "title": "Academic Search Engine",
+      "type": "string"
+    },
+    "general_search_engine": {
+      "anyOf": [
+        {
+          "enum": [
+            "tavily",
+            "parallel",
+            "disabled"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "General Search Engine"
     },
     "planning_exploration_enabled": {
       "default": false,
@@ -219,7 +280,8 @@
         {
           "enum": [
             "wait",
-            "tavily"
+            "tavily",
+            "parallel"
           ],
           "type": "string"
         },

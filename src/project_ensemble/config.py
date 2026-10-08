@@ -6,6 +6,7 @@ import tomllib
 from fnmatch import fnmatchcase
 from typing import Any, Literal
 from pathlib import Path
+from urllib.parse import urlparse
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from project_ensemble.paths import bundled_governance_docs
@@ -169,7 +170,8 @@ class TavilyResearchConfig(BaseModel):
     base_url: str = "https://api.tavily.com"
     api_key_env: str = "TAVILY_API_KEY"
     api_key_file: str | None = None
-    search_depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "advanced"
+    search_depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "basic"
+    extract_enabled: bool = False
     max_results_per_query: int = Field(default=8, ge=1, le=20)
     chunks_per_source: int = Field(default=3, ge=1, le=3)
     max_concurrent_requests: int = Field(default=4, ge=1)
@@ -181,6 +183,24 @@ class TavilyResearchConfig(BaseModel):
         )
 
 
+class ParallelResearchConfig(BaseModel):
+    """Low-cost general search; never use expensive modes or >10 results."""
+
+    enabled: bool = False
+    base_url: str = "https://api.parallel.ai"
+    api_key_env: str = "PARALLEL_API_KEY"
+    api_key_file: str | None = None
+    mode: Literal["fast", "turbo"] = "fast"
+    max_results_per_query: int = Field(default=10, ge=1, le=10)
+    max_chars_total: int = Field(default=20000, ge=1, le=100000)
+    max_concurrent_requests: int = Field(default=4, ge=1)
+
+    def api_key(self) -> str | None:
+        return _read_secret_assignment(
+            env_name=self.api_key_env, assignment_file=self.api_key_file,
+        )
+
+
 class ResearchConfig(BaseModel):
     """System-level defaults for the shared, non-voting Research Desk."""
 
@@ -189,6 +209,7 @@ class ResearchConfig(BaseModel):
     openalex_contact_email: str | None = None
     openalex_api_key_env: str = "OPENALEX_API_KEY"
     openalex_api_key_file: str | None = None
+    search_backend_overrides: list[Literal["openalex", "tavily", "parallel"]] = Field(default_factory=list)
     request_timeout_seconds: float = Field(default=30.0, gt=0)
     max_results_per_query: int = Field(default=12, ge=1, le=50)
     max_concurrent_claim_groups: int = Field(default=4, ge=1)
@@ -200,6 +221,7 @@ class ResearchConfig(BaseModel):
     stable_freshness_days: int = Field(default=180, ge=0)
     max_source_document_bytes: int = Field(default=50_000_000, ge=1)
     tavily: TavilyResearchConfig = Field(default_factory=TavilyResearchConfig)
+    parallel: ParallelResearchConfig = Field(default_factory=ParallelResearchConfig)
 
     def openalex_api_key(self) -> str | None:
         return _read_secret_assignment(
@@ -276,6 +298,26 @@ def load_config(path: str | Path) -> EnsembleConfig:
         lithos.reasoning_effort_transport = "openai"
         lithos.reasoning_effort_map = {"low": "low", "medium": "high", "high": "max"}
         lithos.reasoning_effort_model_patterns = ["*kimi-k3*"]
+    siliconflow_endpoints = {"api.siliconflow.cn"}
+    for provider_id, provider in config.providers.items():
+        if (
+            provider.kind == "openai_compatible"
+            and not provider.reasoning_effort_map
+            and (
+                provider_id == "siliconflow"
+                or urlparse(provider.base_url).hostname in siliconflow_endpoints
+            )
+        ):
+            # SiliconFlow documents reasoning_effort only for these exact model
+            # IDs. Its xhigh compatibility value selects the provider's max tier;
+            # do not expose this control for the rest of its very large catalog.
+            provider.reasoning_effort_transport = "openai"
+            provider.reasoning_effort_map = {"high": "xhigh"}
+            provider.reasoning_effort_model_patterns = [
+                "Pro/deepseek-ai/DeepSeek-V4",
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "Pro/zai-org/GLM-5.2",
+            ]
     config._source_path = source
     if config.project.model_config_file:
         config.project.model_config_file = str(model_source)
@@ -291,6 +333,7 @@ def load_config(path: str | Path) -> EnsembleConfig:
     for owner, field in (
         (config.research, "openalex_api_key_file"),
         (config.research.tavily, "api_key_file"),
+        (config.research.parallel, "api_key_file"),
     ):
         configured_value = getattr(owner, field)
         if configured_value:

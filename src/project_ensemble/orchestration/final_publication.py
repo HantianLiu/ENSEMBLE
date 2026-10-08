@@ -291,15 +291,15 @@ class FinalPublicationRunner:
             )
             if was_created:
                 created.append(link_name)
-        literature = self.repo.root / "public/research/literature_bundle.zip"
+        literature = self.repo.root / "public/research/literature_bundle"
         if literature.exists():
             _path, was_created = ensure_visible_link(
                 self.repo.root,
-                link_name="LITERATURE_BUNDLE.zip",
-                target_relative="public/research/literature_bundle.zip",
+                link_name="LITERATURE_BUNDLE",
+                target_relative="public/research/literature_bundle",
             )
             if was_created:
-                created.append("LITERATURE_BUNDLE.zip")
+                created.append("LITERATURE_BUNDLE")
         if created:
             self.repo.events.append(
                 "HUMAN_VISIBLE_PUBLICATION_LINKS_CREATED",

@@ -102,7 +102,7 @@ class _AppServer:
         self._reader.start()
         self.request("initialize", {
             "clientInfo": {
-                "name": "project_ensemble", "title": "Project ENSEMBLE", "version": "0.7.3",
+                "name": "project_ensemble", "title": "Project ENSEMBLE", "version": "0.7.5",
             }
         }, timeout=20)
         self.send({"method": "initialized", "params": {}})
@@ -252,9 +252,10 @@ class CodexSubscriptionAdapter(ProviderAdapter):
     def generate_with_progress(
         self, request: GenerationRequest, on_progress: StreamProgressCallback | None = None,
     ) -> GenerationResponse:
-        if len(request.user_text) > self.maximum_input_characters:
+        input_characters = len(request.system_text) + len(request.user_text)
+        if input_characters > self.maximum_input_characters:
             raise PermanentProviderError(
-                f"Codex input contains {len(request.user_text)} characters, above the "
+                f"Codex input contains {input_characters} characters, above the "
                 f"{self.maximum_input_characters}-character safety budget"
             )
         if request.extra:

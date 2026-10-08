@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from project_ensemble.domain import MeetingPhase, Persona, RepresentativeStatus
 from project_ensemble.governance_private.thresholds import high_threshold
@@ -23,16 +23,27 @@ from project_ensemble.errors import (
 )
 from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.orchestration.academic_pdf import render_academic_review_pdf
+from project_ensemble.orchestration.academic_figures import (
+    FigureSpec, GENERATED_IMAGE, expand_figure_markers, figure_citation_prose,
+    figure_image_path, figure_text_fallback, freeze_figure_assets, prepare_figures,
+)
 from project_ensemble.orchestration.academic_html import (
     HTML_RENDERING_PROFILE, normalize_reader_citation_groups, render_academic_review_html,
 )
 from project_ensemble.orchestration.final_publication import validate_pdf
 from project_ensemble.orchestration.math_rendering import (
-    PdfMathRenderer, mark_unambiguous_math_atoms, repair_json_decoded_math_commands,
+    PdfMathRenderer, glossary_formula_markdown, mark_unambiguous_math_atoms, repair_json_decoded_math_commands,
     safe_pdf_font_grouping_repair,
 )
+from project_ensemble.orchestration.math_integrity import (
+    FORMULA_BOOKKEEPING_RULES, audit_math_round, notation_reference_from_repo,
+    formula_bookkeeping_rules_for,
+)
+from project_ensemble.runtime.prompt_contract import prompt_contract_version
+from project_ensemble.runtime.evidence_read_loop import ELIGIBLE_SCHEMAS, invoke_with_evidence_reads
 from project_ensemble.orchestration.literature_report import FrozenResearchOutline, OutlineModule
 from project_ensemble.orchestration.literature_style import (
+    FORMULA_REVIEW_RULES,
     LITERATURE_CHAIR_INTEGRATION_RULES,
     LITERATURE_MODULE_WRITING_RULES,
     LITERATURE_WRITING_RULES,
@@ -235,6 +246,17 @@ class ModuleDraft(BaseModel):
     assumption_labels: list[str] = Field(default_factory=list, max_length=40)
     unresolved_ids: list[str] = Field(default_factory=list, max_length=100)
     model_prior_claims: list[str] = Field(default_factory=list, max_length=40)
+    # Optional graphics are validated item by item, never as a whole-chapter gate.
+    figures: list[object] = Field(default_factory=list)
+    figure_diagnostics: list[dict] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_figures(self, handler):
+        value = handler(self)
+        for field in ("figures", "figure_diagnostics"):
+            if not value.get(field):
+                value.pop(field, None)
+        return value  # Old frozen drafts retain their exact serialized shape.
 
     @model_validator(mode="before")
     @classmethod
@@ -276,7 +298,8 @@ class ModuleDraft(BaseModel):
     @model_validator(mode="after")
     def visible_epistemic_labels_and_citations(self) -> "ModuleDraft":
         has_chapter_citations = bool(
-            _CHAPTER_SOURCE_MARKER.search(self.body_markdown + "\n" + self.short_summary)
+            _CHAPTER_SOURCE_MARKER.search(self.body_markdown + "\n" + self.short_summary
+                                          + "\n" + figure_citation_prose(self.figures))
         )
         missing = [
             packet_id
@@ -1673,7 +1696,8 @@ class LiteratureReportExecutionRunner:
                     "若论证依赖关键物理量或定量指标，检查正文是否交代有来源支撑的定义、"
                     "公式符号、单位及测量/平均口径；缺失到无法解释结论或比较研究时，"
                     "指出具体位置和影响，不为增加公式数量而制造异议。"
-                    "若仅有可读性建议，写入可选 style_note，不作为实质问题阻断。"
+                    + FORMULA_REVIEW_RULES
+                    + "若仅有可读性建议，写入可选 style_note，不作为实质问题阻断。"
                 ),
             )
             payload = {
@@ -1769,7 +1793,13 @@ class LiteratureReportExecutionRunner:
         self, module: OutlineModule, draft: ModuleDraft, catalog_path: Path,
         *, previous_draft: ModuleDraft | None = None,
     ) -> ModuleDraft:
-        if not _CHAPTER_SOURCE_MARKER.search(draft.body_markdown + "\n" + draft.short_summary):
+        if draft.figures:
+            figure_catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            body, figures, diagnostics = prepare_figures(draft.body_markdown, draft.figures, figure_catalog)
+            draft = draft.model_copy(update={"body_markdown": body, "figures": figures,
+                                            "figure_diagnostics": [*draft.figure_diagnostics, *diagnostics]})
+        figure_prose = figure_citation_prose(draft.figures)
+        if not _CHAPTER_SOURCE_MARKER.search(draft.body_markdown + "\n" + draft.short_summary + "\n" + figure_prose):
             return draft  # Preserve legacy packet-only drafts and their validation path.
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
         normalized_body = _normalize_chapter_citation_ids(draft.body_markdown, catalog)
@@ -1779,7 +1809,7 @@ class LiteratureReportExecutionRunner:
                 **draft.model_dump(mode="python"),
                 "body_markdown": normalized_body, "short_summary": normalized_summary,
             })
-        prose = draft.body_markdown + "\n" + draft.short_summary
+        prose = draft.body_markdown + "\n" + draft.short_summary + "\n" + figure_prose
         used = list(dict.fromkeys(
             _CHAPTER_SOURCE_MARKER.findall(_normalize_grouped_chapter_citations(prose))
         ))
@@ -2138,7 +2168,8 @@ class LiteratureReportExecutionRunner:
                     "但不要仅凭标题相似推定为同一论文。"
                     "若关键物理量或定量指标缺少数学/操作性定义、单位或测量平均口径，"
                     "以致结果无法解释或跨研究比较，应作为具体实质问题指出；"
-                    "不得要求作者编造文献没有提供的公式。"
+                    + FORMULA_REVIEW_RULES
+                    + "不得要求作者编造文献没有提供的公式。"
                     "不得提交替代全文。纯风格建议写在可选 style_note；不改变票型，也不要求下一轮写作者采纳或解释。"
                 ),
             )
@@ -3412,10 +3443,6 @@ class LiteratureReportExecutionRunner:
                    "dissent": "Objections factuelles retenues", "unresolved": "Questions non résolues",
                    "unsourced": "Énoncés sans source citable", "references": "Références", "glossary": "Glossaire"},
         }[language]
-        render = lambda text: self._render_packet_citations(
-            self._bracket_bare_chapter_ids(text), citation_map, language=language,
-            chapter_citation_map=chapter_citation_map,
-        )
         module_drafts: list[tuple[dict, ModuleDraft]] = []
         all_packet_ids = list(synthesis.cited_packet_ids)
         all_unresolved: list[str] = []
@@ -3426,6 +3453,39 @@ class LiteratureReportExecutionRunner:
             module_drafts.append((outcome, draft))
             all_packet_ids.extend(draft.cited_packet_ids)
             all_unresolved.extend(draft.unresolved_ids)
+        catalog_by_id: dict[str, dict] = {}
+        for outcome, _draft in module_drafts:
+            catalog_path = _effective_chapter_citation_catalog_path(
+                self.repo.root, outcome["module_id"],
+            )
+            if not catalog_path.exists():
+                continue
+            for source in json.loads(catalog_path.read_text(encoding="utf-8"))["sources"]:
+                catalog_by_id[source["citation_id"]] = source
+        chapter_catalog = {"sources": list(catalog_by_id.values())}
+        # Work on assembly copies only; reviewed/frozen Writer drafts are unchanged.
+        assembled_drafts, next_figure_number = [], 1
+        for outcome, draft in module_drafts:
+            assembled_drafts.append((outcome, draft.model_copy(update={"body_markdown": expand_figure_markers(
+                draft.body_markdown, draft.figures, language, first_number=next_figure_number)})))
+            next_figure_number += len(draft.figures)
+        module_drafts = assembled_drafts
+
+        def normalize_publication_citations(text: str) -> str:
+            # Fast local revisions can preserve the right chapter/source numbers
+            # but emit a different amount of zero padding than the frozen catalog.
+            # Reconcile only aliases with one unique catalog match at publication
+            # time; genuinely unknown or ambiguous IDs remain visible to the
+            # fail-closed validation below. Also accept East-Asian citation brackets.
+            return _normalize_chapter_citation_ids(
+                _normalize_chapter_citation_brackets(text), chapter_catalog,
+            )
+
+        render = lambda text: self._render_packet_citations(
+            self._bracket_bare_chapter_ids(normalize_publication_citations(text)),
+            citation_map, language=language,
+            chapter_citation_map=chapter_citation_map,
+        )
         glossary = self._approved_glossary(module_drafts)
         glossary_prose = [
             (entry.source_excerpt if isinstance(entry, GlossaryEntry)
@@ -3494,6 +3554,8 @@ class LiteratureReportExecutionRunner:
         publication_prose = [
             *prose, *unresolved_appendix_prose, *local_science_notes,
         ]
+        prose = [normalize_publication_citations(text) for text in prose]
+        publication_prose = [normalize_publication_citations(text) for text in publication_prose]
         body_chapter_ids = set(_CHAPTER_SOURCE_MARKER.findall(
             "\n".join(_normalize_grouped_chapter_citations(text) for text in prose)
         ))
@@ -3504,15 +3566,6 @@ class LiteratureReportExecutionRunner:
             _CHAPTER_SOURCE_ID.findall("\n".join(publication_prose))
         )
         bare_chapter_ids = all_mentioned_chapter_ids - all_chapter_ids
-        catalog_by_id: dict[str, dict] = {}
-        for outcome, _draft in module_drafts:
-            catalog_path = _effective_chapter_citation_catalog_path(
-                self.repo.root, outcome["module_id"],
-            )
-            if not catalog_path.exists():
-                continue
-            for source in json.loads(catalog_path.read_text(encoding="utf-8"))["sources"]:
-                catalog_by_id[source["citation_id"]] = source
         unknown_chapter_ids = all_mentioned_chapter_ids - catalog_by_id.keys()
         if unknown_chapter_ids:
             raise ValueError(f"unresolved chapter citations: {sorted(unknown_chapter_ids)}")
@@ -3676,12 +3729,9 @@ class LiteratureReportExecutionRunner:
                 parts.append(f"\n- **{entry.term}**: {render(entry.explanation)}"
                              + (f" {render(citations)}" if citations else ""))
                 if entry.formula:
-                    formula = entry.formula.strip()
-                    if formula.startswith("$$") and formula.endswith("$$"):
-                        formula = formula[2:-2].strip()
-                    elif formula.startswith("\\[") and formula.endswith("\\]"):
-                        formula = formula[2:-2].strip()
-                    parts.append(f"\n$$\n{render(formula)}\n$$")
+                    # Delimit math before citation/atom rendering; otherwise
+                    # variables gain inline fences inside a display formula.
+                    parts.append("\n" + render(glossary_formula_markdown(entry.formula)))
         def append_modules(section_heading: str) -> None:
             parts.append(f"\n## {section_heading}")
             for number, (outcome, draft) in enumerate(module_drafts, start=1):
@@ -3934,7 +3984,7 @@ class LiteratureReportExecutionRunner:
         # operator, or mathematical claim may be changed.
         conservative = safe_pdf_font_grouping_repair(formula) or formula
         proposed = None
-        if self.manifest.get("technician_model"):
+        if self.manifest.get("technician_model") and prompt_contract_version(self.repo.root) < 2:
             self.engine.progress.info("PDF 公式无法解析；Technician 正在检查局部 TeX 排版错误")
             try:
                 response = self.engine.invoke_participant(
@@ -4019,6 +4069,32 @@ class LiteratureReportExecutionRunner:
                     "replacements": module_replacements,
                     "policy": "PRESENTATION_ONLY; FROZEN_DRAFTS_UNCHANGED",
                 }, indent=2, ensure_ascii=False))
+        figures = []
+        for outcome in completed:
+            draft_path = outcome.get("draft_path")
+            if draft_path and (self.repo.root / draft_path).is_file():
+                figures.extend(ModuleDraft.model_validate_json(
+                    (self.repo.root / draft_path).read_text(encoding="utf-8")
+                ).figures)
+        # Only generated assets referenced by this report can reach its renderers.
+        requested_paths = {match[2] for match in GENERATED_IMAGE.finditer(markdown)}
+        figures = [item for item in figures if figure_image_path(FigureSpec.model_validate(item)) in requested_paths]
+        figure_assets, figure_records = freeze_figure_assets(self.repo, figures)
+        figure_manifest_relative = None
+        if figure_records:
+            manifest_text = json.dumps({"figures": figure_records}, ensure_ascii=False, indent=2)
+            digest = hashlib.sha256(manifest_text.encode()).hexdigest()
+            figure_manifest_relative = Path("public/final/figures") / f"manifest-{digest}.json"
+            if not (self.repo.root / figure_manifest_relative).exists():
+                self.repo.docs.write_once(figure_manifest_relative, manifest_text)
+        fallback_specs = {figure_image_path(FigureSpec.model_validate(item)): FigureSpec.model_validate(item)
+                          for item in figures}
+        def figure_or_text(match):
+            if match[2] in figure_assets:
+                return match[0]
+            spec = fallback_specs.get(match[2])
+            return figure_text_fallback(spec) if spec else match[1]
+        markdown = GENERATED_IMAGE.sub(figure_or_text, markdown)
         markdown = mark_unambiguous_math_atoms(repair_json_decoded_math_commands(markdown))
         markdown_relative = Path("public/final/literature_review_report.md")
         original_markdown_path = self.repo.root / markdown_relative
@@ -4155,6 +4231,7 @@ class LiteratureReportExecutionRunner:
                 language=self._writing_preferences().get("language"),
                 palette=report_palette,
                 reference_links=reference_links,
+                figure_assets=figure_assets,
             )
             html_bytes = html_document.encode("utf-8")
             self.repo.docs.write_once(html_relative, html_bytes)
@@ -4180,6 +4257,7 @@ class LiteratureReportExecutionRunner:
                 pdf_bytes, font_path = render_academic_review_pdf(
                     markdown, meeting_id=self.repo.meeting_id, palette=report_palette,
                     repair_formula=self._technician_pdf_math_repair,
+                    figure_assets=figure_assets,
                 )
                 validate_pdf(pdf_bytes)
             except ModelReplacementRequested:
@@ -4253,8 +4331,12 @@ class LiteratureReportExecutionRunner:
                 else "NUMBERED_HANGING_INDENT_V2"
             ),
             "citation_trace_path": str(frozen_trace),
-            "literature_bundle_path": "public/research/literature_bundle.zip",
+            "literature_bundle_path": "public/research/literature_bundle",
             "audit_policy": "AUTHORSHIP_AND_INTERNAL_TRAJECTORY_PRIVATE; PUBLIC_EVIDENCE_TRACEABLE",
+            **({"figure_manifest_path": str(figure_manifest_relative),
+                "rendered_figure_count": len(figure_assets),
+                "figure_text_fallback_count": sum(item["status"] == "TEXT_FALLBACK" for item in figure_records)}
+               if figure_manifest_relative else {}),
         }
         if not (self.repo.root / manifest_relative).exists():
             self.repo.docs.write_once(
@@ -4291,6 +4373,8 @@ class LiteratureReportExecutionRunner:
             prompt_family=self.prompt_family,
         )
         system = self.assembler.assemble(spec)
+        if record["runtime"]["persona"] == Persona.LIBRARIAN.value:
+            user_prefix += formula_bookkeeping_rules_for(self.repo)
         if schema.__name__ in {"ModuleDraft", "WholeReportSynthesis"}:
             user_prefix += self._reader_facing_prose_contract()
         user = (
@@ -4298,23 +4382,34 @@ class LiteratureReportExecutionRunner:
             + "\n\n只返回一个符合以下结构的 JSON 对象：\n"
             + json.dumps(schema.model_json_schema(), ensure_ascii=False)
         )
-        response = self.engine.find_recorded_response(
-            rid, system_text=system, user_text=user, stage=stage
-        ) or self.engine.invoke_participant(
-            rid,
-            system_text=system,
-            user_text=user,
-            stage=stage,
-            max_output_tokens=self.max_output_tokens,
+        if prompt_contract_version(self.repo.root) >= 3 and schema.__name__ in ELIGIBLE_SCHEMAS:
+            user = json.dumps({"task": user_prefix}, ensure_ascii=False, separators=(",", ":")) + (
+                "\n\nTARGET JSON SCHEMA:\n"
+                + json.dumps(schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")))
+        read_turn = invoke_with_evidence_reads(
+            self, rid, stage=stage, schema=schema, system=system, user_text=user,
         )
-        return self.engine.validate_structured_response(
+        validation_stage = stage
+        if read_turn is not None:
+            response, system, user, validation_stage = read_turn
+        else:
+            response = self.engine.find_recorded_response(
+                rid, system_text=system, user_text=user, stage=stage
+            ) or self.engine.invoke_participant(
+                rid, system_text=system, user_text=user, stage=stage,
+                max_output_tokens=self.max_output_tokens,
+            )
+        value = self.engine.validate_structured_response(
             rid,
             response=response,
             schema_model=schema,
-            stage=stage,
+            stage=validation_stage,
             max_output_tokens=self.max_output_tokens,
             semantic_requirement="遵守本阶段的行动与数量限制，不添加阶段外材料。",
+            **({"original_system_text": system, "original_user_text": user}
+               if read_turn is not None else {}),
         )
+        return audit_math_round(self, rid, stage, value)
 
     def _reader_facing_prose_contract(self) -> str:
         profile_paths = sorted(
@@ -4334,6 +4429,20 @@ class LiteratureReportExecutionRunner:
         system: str,
         user: dict,
     ) -> BaseModel:
+        if schema.__name__ in {"ScienceChecklist", "FastResolutionVote", "FastEvidenceAppealVote"}:
+            system += formula_bookkeeping_rules_for(self.repo)
+            user = {**user, "notation_reference": notation_reference_from_repo(self.repo, stage, user)}
+        if schema.__name__ in {"WriterChapter", "FastLocalScienceRepair"}:
+            reference = notation_reference_from_repo(self.repo, stage, user)
+            # Local repair already carries the current editable glossary.
+            if schema.__name__ == "FastLocalScienceRepair":
+                reference.pop("prior_glossary", None)
+            user = {**user, "notation_reference": reference}
+            system += (
+                "\n在本轮获准修改的位置同步维护公式格式和符号：依据现有定义及智库长意见，"
+                "保持符号、单位、归一化和适用条件一致，正文与对应术语/公式栏同步修订。"
+                "不得仅为统一记号改变定义，不改无关段落；既有差异需保留并解释作用域。"
+            )
         if schema.__name__ in {
             "FastPlanningTurn", "FastBreadthSearchPlan", "FastSplitProposal",
             "FastTaskbook", "FastModulePlan", "ModuleWritingOutline", "OutlineBallot",
@@ -4349,29 +4458,48 @@ class LiteratureReportExecutionRunner:
         }:
             system += self._reader_facing_prose_contract()
         user_text = (
-            json.dumps(user, indent=2, ensure_ascii=False)
+            json.dumps(user, ensure_ascii=False, separators=(",", ":"))
             + "\n\nTARGET JSON SCHEMA:\n"
-            + json.dumps(schema.model_json_schema(), ensure_ascii=False)
+            + json.dumps(schema.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
         )
-        response = self.engine.find_recorded_response(
-            participant_id, system_text=system, user_text=user_text, stage=stage
-        ) or self.engine.invoke_participant(
-            participant_id,
-            system_text=system,
-            user_text=user_text,
-            stage=stage,
-            max_output_tokens=self.max_output_tokens,
+        read_turn = invoke_with_evidence_reads(
+            self, participant_id, stage=stage, schema=schema, system=system, user_text=user_text,
         )
-        return self.engine.validate_structured_response(
+        validation_stage = stage
+        if read_turn is not None:
+            response, system, user_text, validation_stage = read_turn
+        else:
+            response = self.engine.find_recorded_response(
+                participant_id, system_text=system, user_text=user_text, stage=stage
+            ) or self.engine.invoke_participant(
+                participant_id, system_text=system, user_text=user_text, stage=stage,
+                max_output_tokens=self.max_output_tokens,
+            )
+        value = self.engine.validate_structured_response(
             participant_id,
             response=response,
             schema_model=schema,
-            stage=stage,
+            stage=validation_stage,
             max_output_tokens=self.max_output_tokens,
             semantic_requirement="仅返回要求的限量产物，不改变冻结内容。",
             original_system_text=system,
             original_user_text=user_text,
-            fresh_attempts_remaining=1,
+            # A local revision is a set of nonbinding suggestions. A malformed
+            # response must not create a policy pause or regenerate the chapter.
+            # Existing schema repair (including Technician) remains enabled;
+            # its final failure is handled by the item-wise revision caller.
+            fresh_attempts_remaining=0 if schema.__name__ == "FastLocalScienceRepair" else 1,
+            nonblocking_quality_failure_code=(
+                "LOCAL_REVISION_FORMAT_UNUSABLE"
+                if schema.__name__ == "FastLocalScienceRepair" else None
+            ),
+        )
+        return audit_math_round(
+            self, participant_id, stage, value,
+            run_model_review=not (
+                prompt_contract_version(self.repo.root) >= 2
+                and schema.__name__ in {"WriterChapter", "FastLocalScienceRepair"}
+            ),
         )
 
     def _compact_evidence_index(self) -> list[dict]:
@@ -4547,11 +4675,22 @@ class LiteratureReportExecutionRunner:
             return packet_numbers, chapter_numbers, reference_lines, trace
         ordered_old: list[int] = []
         seen: set[int] = set()
-        marker = re.compile(r"\[(RP-[A-Z0-9]+|C0*[1-9][0-9]*-0*[1-9][0-9]*)\]")
+        packet_marker = re.compile(r"\[(RP-[A-Z0-9]+)\]")
         for paragraph in prose:
             normalized = _normalize_grouped_chapter_citations(_normalize_grouped_packet_citations(paragraph))
-            for match in marker.finditer(normalized):
-                identifier = match.group(1)
+            # Chapter IDs can appear inside a prose-bearing bracket, e.g.
+            # ``[source A 对 source B]``. Such text is not a citation-only
+            # marker, but its IDs are still replaced during final rendering;
+            # include them here too or first-appearance renumbering drops the
+            # corresponding chapter-to-reference mappings.
+            occurrences = [
+                (match.start(), match.group(1)) for match in packet_marker.finditer(normalized)
+            ]
+            occurrences.extend(
+                (match.start(), match.group(0))
+                for match in _CHAPTER_SOURCE_ID.finditer(normalized)
+            )
+            for _, identifier in sorted(occurrences):
                 numbers = (
                     packet_numbers.get(identifier, []) if identifier.startswith("RP-")
                     else [chapter_numbers[identifier]] if identifier in chapter_numbers else []
@@ -4787,7 +4926,7 @@ class LiteratureReportExecutionRunner:
             ("LITERATURE_REVIEW.md", result.final_markdown_path),
             ("LITERATURE_REVIEW.html", result.final_html_path),
             ("LITERATURE_REVIEW.pdf", result.final_pdf_path),
-            ("LITERATURE_BUNDLE.zip", "public/research/literature_bundle.zip"),
+            ("LITERATURE_BUNDLE", "public/research/literature_bundle"),
         )
         for link_name, target in targets:
             if target and (self.repo.root / target).exists():

@@ -17,6 +17,8 @@ from project_ensemble.orchestration.literature_report_execution import (
     _source_identity_key,
 )
 from project_ensemble.orchestration.literature_style import (
+    FORMULA_READER_RULES,
+    FORMULA_REVIEW_RULES,
     LITERATURE_WRITING_RULES,
     is_identifier_only_rewrite,
     leaked_internal_identifiers,
@@ -44,6 +46,10 @@ def test_literature_writing_contract_requires_source_backed_quantitative_definit
     assert "输入控制参数、实测量和推导估计量" in LITERATURE_WRITING_RULES
     assert "热浴设定温度和实测动能温度" in LITERATURE_WRITING_RULES
     assert "不得凭模型记忆补造" in LITERATURE_WRITING_RULES
+    assert "公式表每项应能独立理解" in FORMULA_READER_RULES
+    assert "定义方向或符号约定" in FORMULA_READER_RULES
+    assert "不得凭学科常识或模型记忆补猜" in FORMULA_READER_RULES
+    assert "检查稿件是否清楚保留这一限制" in FORMULA_REVIEW_RULES
 
 
 def test_report_body_length_excludes_references_and_appendices():
@@ -191,13 +197,17 @@ def test_glossary_queries_share_the_first_round_six_question_limit():
         )
 
 
-def test_science_reviewed_rolling_glossary_is_published_before_body(tmp_path):
+@pytest.mark.parametrize("formula", [
+    r"\gamma = \partial F / \partial L",
+    "$$\n" + r"\gamma = \partial F / \partial L" + "\n$$\n" + r"其中 \(F\) 是自由能。",
+])
+def test_science_reviewed_rolling_glossary_is_published_before_body(tmp_path, formula):
     repo = make_repo(tmp_path)
     glossary_path = "public/literature_report/writing_v071/glossary_after_RM-01.json"
     repo.docs.write_once(glossary_path, json.dumps([{
         "term": "线张力", "explanation_mode": "FORMULA",
         "explanation": "二维界面中，线张力表示在指定统计状态和形变约束下，界面长度变化的响应系数；它不能与任意轮廓长度比值混同。",
-        "formula": r"\gamma = \partial F / \partial L",
+        "formula": formula,
         "source_citation_ids": [],
     }], ensure_ascii=False))
     draft_path = "public/literature_report/modules/RM-01/drafts/final.json"
@@ -224,6 +234,14 @@ def test_science_reviewed_rolling_glossary_is_published_before_body(tmp_path):
     assert markdown.index("## 摘要") < markdown.index("## 术语表") < markdown.index("## 引言")
     assert "界面长度变化的响应系数" in markdown
     assert r"\gamma = \partial F / \partial L" in markdown
+    assert "\n$$\n$$\n" not in markdown
+    from project_ensemble.orchestration.academic_html import render_academic_review_html
+    rendered = render_academic_review_html(markdown, meeting_id=repo.meeting_id)
+    article = rendered.split("<main><article>", 1)[1].split("</article>", 1)[0]
+    assert article.count('<div class="math display"') == 1
+    assert r'data-tex="\(' not in article
+    if "其中" in formula:
+        assert "是自由能。" in article
     assert runner._count_report_body_characters(markdown) < len("".join(markdown.split()))
 
 
@@ -779,6 +797,22 @@ def test_final_references_follow_first_textual_appearance_and_deduplicate_work()
     assert [item["reference_number"] for item in trace] == [1, 2]
 
 
+def test_first_appearance_keeps_chapter_ids_inside_prose_bearing_brackets():
+    packet_map, chapter_map, lines, trace = (
+        LiteratureReportExecutionRunner._number_sources_by_first_appearance(
+            prose=["Conflicting reports [C00009-00050 对 C00009-00051]。"],
+            packet_numbers={},
+            chapter_numbers={"C00009-00050": 1, "C00009-00051": 2},
+            reference_lines=["[1] First source.", "", "[2] Second source.", ""],
+            trace=[{"reference_number": 1}, {"reference_number": 2}],
+        )
+    )
+    assert packet_map == {}
+    assert chapter_map == {"C00009-00050": 1, "C00009-00051": 2}
+    assert lines == ["[1] First source.", "", "[2] Second source.", ""]
+    assert [item["reference_number"] for item in trace] == [1, 2]
+
+
 def test_source_identity_uses_strong_ids_before_url_and_never_fuzzy_title():
     assert _source_identity_key("https://doi.org/10.1000/X", "https://one") == (
         _source_identity_key("doi:10.1000/x", "https://two")
@@ -838,6 +872,10 @@ def test_chinese_grouped_temporary_citations_never_reach_reader_text():
     assert LiteratureReportExecutionRunner._render_packet_citations(
         "记录 [RP-AAAA；RP-BBBB]。", {"RP-AAAA": [1], "RP-BBBB": [2]},
     ) == "记录 [1, 2]。"
+    assert LiteratureReportExecutionRunner._render_packet_citations(
+        "单条证据（[C00001-00008]）与另一条证据（[RP-AAAA]）。",
+        {"RP-AAAA": [9]}, chapter_citation_map={"C00001-00008": 8},
+    ) == "单条证据[8]与另一条证据[9]。"
     assert LiteratureReportExecutionRunner._render_packet_citations(
         "正文。（[C00001-00008]；[C00001-00010]；[C00001-00077]）", {},
         chapter_citation_map={
@@ -925,6 +963,166 @@ def test_assembly_maps_bare_catalog_ids_without_changing_frozen_trace(tmp_path, 
                               .read_text(encoding="utf-8"))
     assert supplemental["style"] == "NUMBERED_FIRST_APPEARANCE_V4"
     assert len(supplemental["references"]) == 2
+
+
+def test_assembly_canonicalizes_chapter_citation_padding_and_fullwidth_brackets(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    sources = {
+        "RP-FIRST": EvidenceSource(
+            source_id="SOURCE-1", title="First source", publication_year=2024,
+            url="https://example.org/first", evidence_use_class=EvidenceUseClass.REVIEW,
+        ),
+        "RP-SECOND": EvidenceSource(
+            source_id="SOURCE-2", title="Second source", publication_year=2025,
+            url="https://example.org/second", evidence_use_class=EvidenceUseClass.REVIEW,
+        ),
+    }
+    repo.docs.write_once(
+        "public/literature_report/modules/RM-02/research/chapter_citation_catalog.json",
+        json.dumps({"chapter_number": 2, "sources": [
+            {"citation_id": "C00002-00001", "packet_ids": ["RP-FIRST"],
+             "doi": None, "url": "https://example.org/first"},
+            {"citation_id": "C00002-00002", "packet_ids": ["RP-SECOND"],
+             "doi": None, "url": "https://example.org/second"},
+        ]}),
+    )
+    synthesis_path = "public/literature_report/synthesis/citation-aliases.json"
+    repo.docs.write_once(synthesis_path, json.dumps({
+        "title": "Test report", "abstract": "Synthesis【C2-1】.",
+        "introduction": "", "methods": "", "cross_module_synthesis": "",
+        "conclusion": "", "cited_packet_ids": [],
+    }, ensure_ascii=False))
+    draft_path = "public/literature_report/modules/RM-02/drafts/citation-aliases.json"
+    repo.docs.write_once(draft_path, json.dumps({
+        "title": "Evidence", "body_markdown": "Claim【C00002-0002】.",
+        "short_summary": "Summary [C00002-0001].", "cited_packet_ids": [],
+    }, ensure_ascii=False))
+    original_draft = (repo.root / draft_path).read_bytes()
+    runner = LiteratureReportExecutionRunner(
+        repo=repo,
+        engine=MeetingEngine(repo=repo, adapters={"fake": ExecutionAdapter()}, notifier=NoopNotifier()),
+        governance_docs="docs/governance", research_desk=FakeResearchDesk(),
+    )
+    monkeypatch.setattr(runner, "_writing_preferences", lambda: {
+        "language": "zh", "full_abstract": True, "section_abstracts": True,
+    })
+    monkeypatch.setattr(
+        runner, "_load_packet",
+        lambda packet_id: SimpleNamespace(sources=[sources[packet_id]]),
+    )
+
+    report = runner._assemble_report_markdown(
+        None, [{"module_id": "RM-02", "status": "ADOPTED", "draft_path": draft_path}],
+        repo.root / synthesis_path, footnotes=[],
+    )
+
+    assert "Synthesis[1]." in report
+    assert "Claim[2]." in report
+    assert "Summary [1]." in report
+    assert "First source" in report and "Second source" in report
+    assert "C00002-" not in report
+    assert (repo.root / draft_path).read_bytes() == original_draft
+
+
+def test_assembly_renders_chapter_ids_inside_prose_bearing_brackets(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    packet_id = "RP-PAIR"
+    sources = [
+        EvidenceSource(
+            source_id="SOURCE-50", title="First source", publication_year=2024,
+            url="https://example.org/first", evidence_use_class=EvidenceUseClass.REVIEW,
+        ),
+        EvidenceSource(
+            source_id="SOURCE-51", title="Second source", publication_year=2025,
+            url="https://example.org/second", evidence_use_class=EvidenceUseClass.REVIEW,
+        ),
+    ]
+    repo.docs.write_once(
+        "public/literature_report/modules/RM-09/research/chapter_citation_catalog.json",
+        json.dumps({"chapter_number": 9, "sources": [
+            {"citation_id": "C00009-00050", "packet_ids": [packet_id],
+             "doi": None, "url": sources[0].url},
+            {"citation_id": "C00009-00051", "packet_ids": [packet_id],
+             "doi": None, "url": sources[1].url},
+        ]}),
+    )
+    synthesis_path = "public/literature_report/synthesis/prose-citation-ids.json"
+    repo.docs.write_once(synthesis_path, json.dumps({
+        "title": "Test report", "abstract": "", "introduction": "", "methods": "",
+        "cross_module_synthesis": "", "conclusion": "", "cited_packet_ids": [],
+    }, ensure_ascii=False))
+    draft_path = "public/literature_report/modules/RM-09/drafts/prose-citation-ids.json"
+    repo.docs.write_once(draft_path, json.dumps({
+        "title": "Evidence", "body_markdown": "Conflicting reports [C00009-00050 对 C00009-00051]。",
+        "short_summary": "Brief summary.", "cited_packet_ids": [],
+    }, ensure_ascii=False))
+    runner = LiteratureReportExecutionRunner(
+        repo=repo,
+        engine=MeetingEngine(repo=repo, adapters={"fake": ExecutionAdapter()}, notifier=NoopNotifier()),
+        governance_docs="docs/governance", research_desk=FakeResearchDesk(),
+    )
+    monkeypatch.setattr(
+        runner, "_load_packet",
+        lambda _packet_id: SimpleNamespace(sources=sources),
+    )
+
+    report = runner._assemble_report_markdown(
+        None, [{"module_id": "RM-09", "status": "ADOPTED", "draft_path": draft_path}],
+        repo.root / synthesis_path, footnotes=[],
+    )
+
+    assert "[1] 对 [2]" in report
+    assert "First source" in report and "Second source" in report
+    assert "C00009-00050" not in report and "C00009-00051" not in report
+
+
+@pytest.mark.parametrize("graphics_available", [True, False])
+def test_programmatic_figure_citations_are_assembled_and_published(tmp_path, monkeypatch, graphics_available):
+    from project_ensemble.orchestration import academic_figures
+    native_renderer = academic_figures.render_figure
+    if not graphics_available:
+        def broken_renderer(_spec):
+            raise RuntimeError("可选绘图器不可用")
+        monkeypatch.setattr(academic_figures, "render_figure", broken_renderer)
+    repo = make_repo(tmp_path)
+    source = EvidenceSource(source_id="SOURCE-1", title="Measured data", publication_year=2024,
+                            url="https://example.org/data", evidence_use_class=EvidenceUseClass.REVIEW)
+    packet = SimpleNamespace(sources=[source])
+    repo.docs.write_once("public/literature_report/modules/RM-01/research/chapter_citation_catalog.json",
+                         json.dumps({"sources": [{"citation_id": "C1-1", "packet_ids": ["RP-DATA"],
+                                                   "doi": None, "url": source.url}]}))
+    figure = dict(id="response", kind="bar", title="响应比较", caption="共同口径下的比较。",
+                  alt_text="第二组响应更高。", evidence_basis="extracted", data_note="可读表一直接给出的值。",
+                  source_citation_ids=["C1-1"], x_label="组别", y_label="响应 (nm)",
+                  categories=["A", "B"], series=[dict(label="响应", y=[1, 2])])
+    draft_path = "public/literature_report/modules/RM-01/drafts/figures.json"
+    repo.docs.write_once(draft_path, ModuleDraft(title="结果", body_markdown="同口径比较如下。\n\n[[FIGURE:response]]",
+                                               short_summary="比较两组。", figures=[figure]).model_dump_json())
+    synthesis_path = "public/literature_report/synthesis/test.json"
+    repo.docs.write_once(synthesis_path, json.dumps({"title": "Test figures", "abstract": "", "introduction": "",
+                                                   "methods": "", "cross_module_synthesis": "", "conclusion": "",
+                                                   "cited_packet_ids": []}))
+    runner = LiteratureReportExecutionRunner(
+        repo=repo, engine=MeetingEngine(repo=repo, adapters={"fake": ExecutionAdapter()}, notifier=NoopNotifier()),
+        governance_docs="docs/governance", research_desk=FakeResearchDesk())
+    monkeypatch.setattr(runner, "_load_packet", lambda _packet_id: packet)
+    monkeypatch.setattr(runner, "_compact_evidence_index", lambda: [])
+    completed = [{"module_id": "RM-01", "status": "CONFIRMED", "draft_path": draft_path}]
+    original = (repo.root / draft_path).read_bytes()
+    markdown = runner._assemble_report_markdown(None, completed, repo.root / synthesis_path, footnotes=[])
+    assert "C1-1" not in markdown and "[[FIGURE:" not in markdown
+    assert "figures/generated-" in markdown and "[1]" in markdown
+    result = runner._publish(markdown, completed, 0)
+    assert result.status == "HANDOFF_READY" and result.final_pdf_path
+    html = (repo.root / result.final_html_path).read_text()
+    assert ('class="ensemble-figure"' in html) == graphics_available
+    manifest = json.loads((repo.root / result.audit_manifest_path).read_text())
+    assert manifest["rendered_figure_count"] == int(graphics_available)
+    assert manifest["figure_text_fallback_count"] == int(not graphics_available)
+    assert (repo.root / manifest["figure_manifest_path"]).is_file()
+    assert (repo.root / draft_path).read_bytes() == original
+    monkeypatch.setattr(academic_figures, "render_figure", native_renderer)
+    assert runner._publish(markdown, completed, 0).final_markdown_path == result.final_markdown_path
 
 
 def test_assembly_nests_module_headings_without_touching_code_blocks():

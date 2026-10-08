@@ -13,7 +13,7 @@ from project_ensemble.storage.meeting import MeetingRepository
 
 class RecoveryRetriever(TavilyRetriever):
     def __init__(self):
-        super().__init__(api_key="fixture")
+        super().__init__(api_key="fixture", extract_enabled=True)
         self.queries = []
 
     def retrieve_exploratory(self, query):

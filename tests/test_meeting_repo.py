@@ -86,7 +86,7 @@ def test_meeting_repo_separates_public_and_identity(tmp_path):
     assert "selected_models" not in public_manifest
     assert "chair_model" not in public_manifest
     assert private_manifest["chair_model"] == ["deepseek", "chair-model"]
-    assert private_manifest["software_version"] == "0.7.3"
+    assert private_manifest["software_version"] == "0.7.5"
     assert private_manifest["governance_version"] == "0.7.1"
     assert repo.events.verify()
 

@@ -19,14 +19,15 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections import deque
 from itertools import count
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from project_ensemble.domain import MeetingPhase, Persona
 from project_ensemble.errors import (
     ForcedModelReplacementRequested,
     ProviderContentRejectedError, ProviderError, RepresentativeUnavailableError, ResearchQualityControlError,
+    InputContextLimitError, OutputLimitReachedError, EmptyModelOutputError,
     ResearchRequestRejectedError, TransientProviderError, OpenAlexDailyQuotaExhausted,
 )
 from project_ensemble.orchestration.consultations import (
@@ -39,9 +40,15 @@ from project_ensemble.orchestration.literature_report_execution import (
     LiteratureReportExecutionResult, LiteratureReportExecutionRunner,
     ReaderFacingLineRepair, WholeReportSynthesis,
     _effective_chapter_citation_catalog_path,
+    _normalize_chapter_citation_ids,
 )
 from project_ensemble.orchestration.literature_style import (
-    is_identifier_only_rewrite, leaked_internal_identifiers,
+    FORMULA_REVIEW_RULES, is_identifier_only_rewrite, leaked_internal_identifiers,
+)
+from project_ensemble.orchestration.math_integrity import NotationRecord, audit_math_round
+from project_ensemble.runtime.prompt_contract import prompt_contract_version
+from project_ensemble.orchestration.academic_figures import (
+    FIGURE_REVIEW_RULES, FigureSpec, figure_citation_prose, prepare_figures, writer_figure_skill,
 )
 from project_ensemble.orchestration.literature_writing_v071 import (
     GlossaryTerm, LiteratureWritingPaused, ModuleWritingOutline, ScienceChecklist, WriterChapter,
@@ -140,7 +147,7 @@ class FastPlanningTurn(BaseModel):
     action: Literal["ASK", "SEARCH", "PROPOSE"]
     question: str | None = Field(default=None, max_length=1000)
     search_queries: list[str] = Field(default_factory=list, max_length=2)
-    source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL
+    source_domain: ClaimSourceDomain = ClaimSourceDomain.ACADEMIC
     taskbook: FastTaskbook | None = None
 
     @model_validator(mode="after")
@@ -161,7 +168,7 @@ class FastBreadthSearchPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     question: str = Field(min_length=1, max_length=1000)
     search_queries: list[str] = Field(default_factory=list, max_length=8)
-    source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL
+    source_domain: ClaimSourceDomain = ClaimSourceDomain.ACADEMIC
 
     @model_validator(mode="after")
     def distinct_queries(self) -> "FastBreadthSearchPlan":
@@ -259,10 +266,21 @@ class FastWholeModuleRewriteRequested(Exception):
     """Human requested a full module rewrite after local patching failed."""
 
 
+class FastLocalRepairSkipped(Exception):
+    """Human skipped a failed local patch while retaining its unresolved science concerns."""
+
+    def __init__(self, rationale: str):
+        self.rationale = rationale
+        super().__init__(rationale)
+
+
 class FastResolutionVote(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     resolved: bool
     remaining_material_problems: list[str] = Field(default_factory=list, max_length=8)
+    # Advisory notation records do not alter the scientific-resolution vote.
+    notation_bookkeeping: list[NotationRecord] = Field(default_factory=list, max_length=80)
+    formula_format_notes: list[str] = Field(default_factory=list, max_length=24)
 
     @model_validator(mode="after")
     def explanation_matches(self) -> "FastResolutionVote":
@@ -287,7 +305,7 @@ class FastLocalScienceEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     old_text: str | None = Field(default=None, min_length=1)
     new_text: str = Field(min_length=1)
-    objection_numbers: list[int] = Field(min_length=1, max_length=8)
+    objection_numbers: list[int] = Field(min_length=1)
     paragraph_number: int | None = Field(default=None, ge=1)
     target_field: Literal["body_markdown", "short_summary"] | None = None
     replace_entire_field: bool = False
@@ -315,7 +333,7 @@ class FastLocalScienceGlossaryEdit(BaseModel):
     field: Literal["explanation", "formula"]
     expected_text: str | None = Field(default=None, min_length=1)
     new_text: str = Field(min_length=1)
-    objection_numbers: list[int] = Field(min_length=1, max_length=8)
+    objection_numbers: list[int] = Field(min_length=1)
 
     @model_validator(mode="after")
     def valid_objection_numbers(self) -> "FastLocalScienceGlossaryEdit":
@@ -329,7 +347,7 @@ class FastLocalScienceGlossaryEdit(BaseModel):
 class FastLocalScienceGlossaryAddition(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     entry: GlossaryTerm
-    objection_numbers: list[int] = Field(min_length=1, max_length=8)
+    objection_numbers: list[int] = Field(min_length=1)
 
     @model_validator(mode="after")
     def valid_objection_numbers(self) -> "FastLocalScienceGlossaryAddition":
@@ -340,19 +358,295 @@ class FastLocalScienceGlossaryAddition(BaseModel):
         return self
 
 
-class FastLocalScienceRepair(BaseModel):
+class FastLocalScienceInferenceLabelEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    edits: list[FastLocalScienceEdit] = Field(default_factory=list, max_length=12)
-    glossary_edits: list[FastLocalScienceGlossaryEdit] = Field(default_factory=list, max_length=12)
-    glossary_additions: list[FastLocalScienceGlossaryAddition] = Field(
-        default_factory=list, max_length=8,
-    )
+    # Zero-based index, matching the serialized ModuleDraft.inference_labels list.
+    label_index: int = Field(ge=0, lt=40)
+    expected_text: str = Field(min_length=1)
+    new_text: str = Field(min_length=1)
+    objection_numbers: list[int] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def has_local_change(self) -> "FastLocalScienceRepair":
-        if not self.edits and not self.glossary_edits and not self.glossary_additions:
-            raise ValueError("a local science repair must contain a text or glossary change")
+    def valid_objection_numbers(self) -> "FastLocalScienceInferenceLabelEdit":
+        if any(number < 1 for number in self.objection_numbers):
+            raise ValueError("objection numbers must be positive")
+        if len(set(self.objection_numbers)) != len(self.objection_numbers):
+            raise ValueError("objection numbers must be unique within a label edit")
         return self
+
+
+class FastLocalScienceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    objection_number: int = Field(ge=1)
+    response: str = Field(min_length=1)
+
+
+class FastLocalScienceFigureEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    figure_id: str
+    expected_figure: dict
+    replacement: dict | None = None
+    objection_numbers: list[int] = Field(min_length=1)
+
+
+class FastLocalScienceRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # Preserve malformed items verbatim for the Technician/audit instead of
+    # rejecting a whole response. The typed branch is always tried first.
+    edits: list[Annotated[FastLocalScienceEdit | Any, Field(union_mode="left_to_right")]] = Field(default_factory=list)
+    glossary_edits: list[Annotated[FastLocalScienceGlossaryEdit | Any, Field(union_mode="left_to_right")]] = Field(default_factory=list)
+    glossary_entries: list[Annotated[FastLocalScienceGlossaryAddition | Any, Field(union_mode="left_to_right")]] = Field(
+        default_factory=list,
+        max_length=40,
+        validation_alias=AliasChoices("glossary_entries", "glossary_additions"),
+        description=(
+            "Complete term definitions keyed by term: update an existing term or insert a new one. "
+            "Use editable_glossary_entries as the authoritative current glossary. "
+            "The legacy glossary_additions input is accepted with the same update-or-insert semantics."
+        ),
+    )
+    inference_label_edits: list[Annotated[FastLocalScienceInferenceLabelEdit | Any, Field(union_mode="left_to_right")]] = Field(
+        default_factory=list, max_length=40,
+    )
+    objection_responses: list[FastLocalScienceResponse] = Field(default_factory=list)
+    figure_edits: list[Annotated[FastLocalScienceFigureEdit | Any, Field(union_mode="left_to_right")]] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_figure_edits(self, handler):
+        value = handler(self)
+        if not value.get("figure_edits"):
+            value.pop("figure_edits", None)
+        return value
+
+
+def _local_revision_or_empty(runner, relative, *args, **kwargs):
+    """After normal schema/Technician repair, an unreadable suggestion is optional.
+
+    Only the specific local-revision format failure is recoverable here. Provider
+    outages, user pauses and other governance failures retain their own handling.
+    """
+    failure_path = relative.with_name(relative.stem + "_failure.json")
+    if (runner.repo.root / failure_path).is_file() and not (runner.repo.root / relative).is_file():
+        _freeze(runner, relative, FastLocalScienceRepair())
+    try:
+        return _frozen_or_call(runner, relative, *args, **kwargs)
+    except ResearchQualityControlError as exc:
+        if exc.code != "LOCAL_REVISION_FORMAT_UNUSABLE":
+            raise
+        _freeze(runner, failure_path, {"reason": str(exc), "science_review_required": True})
+        proposal = FastLocalScienceRepair()
+        _freeze(runner, relative, proposal)
+        runner.engine.progress.info(
+            "本轮修订输出经格式修复仍不可用；保留原稿和全部科学异议，继续科学复核，不重复生成修订。"
+        )
+        return proposal
+
+
+def _apply_local_science_items(chapter, proposal, effective_glossary, objection_count,
+                               retain_citations, validate_entry, validate_figure=None):
+    """Apply independent, valid suggestions; return rejected items to science review.
+
+    No model suggestion is a mandatory edit. Each item uses an isolated candidate,
+    so failed anchors or malformed glossary operations cannot poison later items.
+    """
+    changed = chapter.model_dump(mode="python")
+    paragraphs = _markdown_paragraph_spans(chapter.draft.body_markdown)
+    rejected, accepted = [], []
+    spans = []
+    used_paragraphs, used_fields = set(), set()
+
+    def reject(group, index, item, error):
+        numbers = (item.get("objection_numbers", []) if isinstance(item, dict)
+                   else getattr(item, "objection_numbers", []))
+        rejected.append({"group": group, "index": index,
+                         "objection_numbers": numbers,
+                         "reason": str(error)})
+
+    def check_numbers(item):
+        if any(number < 1 or number > objection_count for number in item.objection_numbers):
+            raise ValueError("suggestion references an objection outside the frozen list")
+
+    def accept(group, index, item):
+        accepted.append({"group": group, "index": index,
+                         "objection_numbers": item.objection_numbers})
+
+    for index, edit in enumerate(proposal.edits):
+        if not isinstance(edit, FastLocalScienceEdit):
+            reject("edits", index, edit, "正文修订项结构不完整，已单项转交排障员")
+            continue
+        if edit.paragraph_number is None and not edit.replace_entire_field:
+            continue
+        try:
+            check_numbers(edit)
+            if edit.paragraph_number is not None:
+                number = edit.paragraph_number
+                if number > len(paragraphs) or number in used_paragraphs:
+                    raise ValueError(f"invalid or repeated body paragraph: {number}")
+                start, end, old = paragraphs[number - 1]
+                if edit.old_text is not None and edit.old_text.strip() != old.strip():
+                    raise ValueError(f"old_text does not match body paragraph {number}")
+                replacement = retain_citations(edit.new_text, old, f"body paragraph {number}")
+                if replacement == old:
+                    raise ValueError(f"replacement does not change body paragraph {number}")
+                spans.append((start, end, replacement))
+                used_paragraphs.add(number)
+            else:
+                if "short_summary" in used_fields:
+                    raise ValueError("short_summary has multiple replacements")
+                replacement = retain_citations(edit.new_text, chapter.draft.short_summary, "short_summary")
+                if replacement == chapter.draft.short_summary:
+                    raise ValueError("replacement does not change short_summary")
+                changed["draft"]["short_summary"] = replacement
+                used_fields.add("short_summary")
+            accept("edits", index, edit)
+        except ValueError as exc:
+            reject("edits", index, edit, exc)
+    for start, end, text in sorted(spans, reverse=True):
+        body = changed["draft"]["body_markdown"]
+        changed["draft"]["body_markdown"] = body[:start] + text + body[end:]
+
+    for index, edit in enumerate(proposal.edits):
+        if not isinstance(edit, FastLocalScienceEdit):
+            continue
+        if edit.paragraph_number is not None or edit.replace_entire_field:
+            continue
+        try:
+            check_numbers(edit)
+            candidate = copy.deepcopy(changed)
+            locations = []
+            for field in ((edit.target_field,) if edit.target_field else ("body_markdown", "short_summary")):
+                if candidate["draft"][field].count(edit.old_text) == 1:
+                    locations.append((candidate["draft"], field))
+            if edit.target_field is None:
+                for term in candidate.get("glossary_additions", []):
+                    for field in ("explanation", "formula"):
+                        if isinstance(term.get(field), str) and term[field].count(edit.old_text) == 1:
+                            locations.append((term, field))
+            if len(locations) != 1:
+                raise ValueError("old_text must occur exactly once in one editable field")
+            target, field = locations[0]
+            replacement = retain_citations(edit.new_text, edit.old_text, f"selected text in {field}")
+            if replacement == edit.old_text:
+                raise ValueError(f"replacement does not change selected text in {field}")
+            target[field] = target[field].replace(edit.old_text, replacement, 1)
+            WriterChapter.model_validate(candidate)
+            changed = candidate
+            accept("edits", index, edit)
+        except ValueError as exc:
+            reject("edits", index, edit, exc)
+
+    used_label_indices = set()
+    for index, edit in enumerate(proposal.inference_label_edits):
+        if not isinstance(edit, FastLocalScienceInferenceLabelEdit):
+            reject("inference_label_edits", index, edit, "推断标签修订项结构不完整，已单项转交排障员")
+            continue
+        try:
+            check_numbers(edit)
+            label_index = edit.label_index
+            labels = changed["draft"].get("inference_labels", [])
+            if label_index >= len(labels):
+                raise ValueError(f"inference label index is out of range: {label_index}")
+            if label_index in used_label_indices:
+                raise ValueError(f"inference label index is repeated: {label_index}")
+            if labels[label_index] != edit.expected_text:
+                raise ValueError(f"expected_text does not match inference_labels[{label_index}]")
+            replacement = retain_citations(
+                edit.new_text, edit.expected_text, f"inference_labels[{label_index}]",
+            )
+            if replacement == labels[label_index]:
+                raise ValueError(f"replacement does not change inference_labels[{label_index}]")
+            candidate = copy.deepcopy(changed)
+            candidate["draft"]["inference_labels"][label_index] = replacement
+            WriterChapter.model_validate(candidate)
+            changed = candidate
+            used_label_indices.add(label_index)
+            accept("inference_label_edits", index, edit)
+        except ValueError as exc:
+            reject("inference_label_edits", index, edit, exc)
+
+    for group, items in (("glossary_edits", proposal.glossary_edits),
+                         ("glossary_entries", proposal.glossary_entries)):
+        used_targets = set()
+        for index, item in enumerate(items):
+            expected_type = FastLocalScienceGlossaryEdit if group == "glossary_edits" else FastLocalScienceGlossaryAddition
+            if not isinstance(item, expected_type):
+                reject(group, index, item, "术语修订项结构不完整，已单项转交排障员")
+                continue
+            try:
+                check_numbers(item)
+                candidate = copy.deepcopy(changed)
+                entries = candidate.setdefault("glossary_additions", [])
+                name = item.term if group == "glossary_edits" else item.entry.term
+                key = name.strip().casefold()
+                target_key = (key, item.field) if group == "glossary_edits" else key
+                if target_key in used_targets:
+                    raise ValueError(f"multiple competing glossary suggestions: {name}")
+                matches = [i for i, entry in enumerate(entries)
+                           if str(entry["term"]).strip().casefold() == key]
+                if len(matches) > 1:
+                    raise ValueError(f"ambiguous source glossary term: {name}")
+                if group == "glossary_edits":
+                    old = (entries[matches[0]] if matches else effective_glossary.get(key))
+                    if old is None:
+                        raise ValueError(f"unknown glossary term: {name}")
+                    entry = copy.deepcopy(old)
+                    if item.expected_text is not None and entry.get(item.field) != item.expected_text:
+                        raise ValueError(f"glossary field changed since the patch context: {name}.{item.field}")
+                    entry[item.field] = item.new_text
+                    if item.field == "formula":
+                        entry["explanation_mode"] = "FORMULA"
+                else:
+                    entry = item.entry.model_dump(mode="python")
+                previous = (entries[matches[0]] if matches else effective_glossary.get(key))
+                if previous is not None and entry == previous:
+                    raise ValueError(f"replacement does not change glossary term: {name}")
+                validate_entry(GlossaryTerm.model_validate(entry), effective_glossary.get(key, {}))
+                if matches:
+                    entries[matches[0]] = entry
+                else:
+                    entries.append(entry)
+                WriterChapter.model_validate(candidate)
+                changed = candidate
+                used_targets.add(target_key)
+                accept(group, index, item)
+            except ValueError as exc:
+                reject(group, index, item, exc)
+    used_figures = set()
+    for index, item in enumerate(proposal.figure_edits):
+        try:
+            if not isinstance(item, FastLocalScienceFigureEdit):
+                raise ValueError("配图修订项结构不完整")
+            check_numbers(item)
+            figures = changed["draft"].get("figures", [])
+            matches = [i for i, figure in enumerate(figures) if figure.get("id") == item.figure_id]
+            if len(matches) != 1 or item.figure_id in used_figures:
+                raise ValueError("配图定位缺失、歧义或重复")
+            position = matches[0]
+            if figures[position] != item.expected_figure:
+                raise ValueError("配图规格与修订锚点不一致")
+            candidate = copy.deepcopy(changed)
+            if item.replacement is None:
+                candidate["draft"]["figures"].pop(position)
+                candidate["draft"]["body_markdown"] = candidate["draft"]["body_markdown"].replace(
+                    f"[[FIGURE:{item.figure_id}]]", "")
+            else:
+                replacement = FigureSpec.model_validate(item.replacement)
+                if replacement.id != item.figure_id:
+                    raise ValueError("修订须保留配图编号")
+                if validate_figure is not None:
+                    replacement = validate_figure(replacement)
+                candidate["draft"]["figures"][position] = replacement.model_dump(mode="json")
+            changed = candidate
+            used_figures.add(item.figure_id)
+            accept("figure_edits", index, item)
+        except ValueError as exc:
+            reject("figure_edits", index, item, exc)
+    covered = {number for item in accepted for number in item["objection_numbers"]}
+    return WriterChapter.model_validate(changed), {
+        "accepted_items": accepted, "rejected_items": rejected,
+        "objections_without_applied_edit": sorted(set(range(1, objection_count + 1)) - covered),
+        "science_review_required": True,
+    }
 
 
 class FastSearchQueries(BaseModel):
@@ -430,7 +724,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
 
     def _planning_search(self, *, key: str, question: str, queries: list[str],
                          cycle: int, turn: int, requester_id: str = "FAST_WRITER",
-                         source_domain: ClaimSourceDomain = ClaimSourceDomain.GENERAL) -> dict:
+                         source_domain: ClaimSourceDomain = ClaimSourceDomain.ACADEMIC) -> dict:
         """One replayable discovery-only search; never a formal evidence verdict."""
         relative = self._fast_root() / "planning_search" / f"{key}.json"
         if (self.repo.root / relative).is_file():
@@ -634,6 +928,19 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             question=question, options=options, context=context,
         ))
         resolution = service.resolution(issue_id)
+        if resolution is None:
+            from project_ensemble.runtime.fast_science_delegation import try_automatic_fast_science
+            issue = next(item for item in service.open_issues() if item.issue_id == issue_id)
+            resolution = try_automatic_fast_science(
+                self.repo, issue, engine=getattr(self, "engine", None),
+                max_output_tokens=getattr(self, "max_output_tokens", None),
+            )
+            if resolution is None and stage == "FAST_SCOPE_QUESTION":
+                from project_ensemble.runtime.fast_scope_consultation import try_automatic_fast_scope
+                resolution = try_automatic_fast_scope(
+                    self.repo, issue, engine=getattr(self, "engine", None),
+                    max_output_tokens=getattr(self, "max_output_tokens", None),
+                )
         if resolution is None:
             raise LiteratureWritingPaused(stage + "_HUMAN_REQUIRED")
         return resolution
@@ -1402,7 +1709,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             if (retrieval is not None
                     and "openalex" in getattr(retrieval, "failed_backend_ids", ())
                     and retriever is not None
-                    and retriever.quota_policy == "tavily"):
+                    and retriever.quota_policy in {"tavily", "parallel"}):
                 try:
                     supplemented = self._fast_retrieve_claim(
                         module, round_number, index, claim, normalized,
@@ -1465,9 +1772,10 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                         if use_backup:
                             quota_authorized = True
                             from project_ensemble.runtime.run_controls import record_run_control
+                            from project_ensemble.research.search_policy import general_search_engine
                             record_run_control(
                                 self.repo, kind="openalex_quota_policy", target=None,
-                                value="tavily",
+                                value=general_search_engine(self.repo),
                                 reason="Human authorized backup search after confirmed OpenAlex daily exhaustion",
                             )
                             refresh = getattr(self, "batch_retriever_refresh", None)
@@ -1477,7 +1785,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                             if policy is not None and quota_error is not None:
                                 policy.suspend_openalex(quota_error.reset_seconds)
                             self.engine.progress.info(
-                                "人类已授权 Tavily 接手；只重提尚未落盘的检索，已完成的非检索工作保留"
+                                "人类已授权所选通用搜索引擎接手；只重提尚未落盘的检索，已完成的非检索工作保留"
                             )
                             for stage, job, normalized, retrieved, prepared in quota_parked:
                                 if len(futures) >= maximum:
@@ -1523,7 +1831,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                                 if item["control_kind"] == "research_parallelism":
                                     maximum = max(1, min(int(item["value"]), len(jobs)))
                                     self.research_max_concurrent_claim_groups = maximum
-                                elif item["control_kind"] == "openalex_quota_policy":
+                                elif item["control_kind"] in {"openalex_quota_policy", "general_search_allowed", "general_search_engine"}:
                                     refresh = getattr(self, "batch_retriever_refresh", None)
                                     if callable(refresh):
                                         refresh()
@@ -1730,7 +2038,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                     self.repo, kind=item["control_kind"], target=item["target"],
                     value=item["value"], reason=item["reason"],
                 )
-            if any(item["control_kind"] == "openalex_quota_policy" for item in controls):
+            if any(item["control_kind"] in {"openalex_quota_policy", "general_search_allowed", "general_search_engine"} for item in controls):
                 refresh = getattr(self, "batch_retriever_refresh", None)
                 if callable(refresh):
                     refresh()
@@ -1967,7 +2275,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                             self.repo, kind=item["control_kind"],
                             target=item["target"], value=item["value"], reason=item["reason"],
                         )
-                    if any(item["control_kind"] == "openalex_quota_policy"
+                    if any(item["control_kind"] in {"openalex_quota_policy", "general_search_allowed", "general_search_engine"}
                            for item in queued_controls):
                         refresh = getattr(self, "batch_retriever_refresh", None)
                         if callable(refresh):
@@ -2040,17 +2348,21 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
         catalog_path = _effective_chapter_citation_catalog_path(self.repo.root, module.module_id)
         catalog = (json.loads(catalog_path.read_text(encoding="utf-8"))
                    if catalog_path.is_file() else {"sources": []})
-        prose = chapter.draft.body_markdown + "\n" + chapter.draft.short_summary
+        prose = chapter.draft.body_markdown + "\n" + chapter.draft.short_summary + "\n" + figure_citation_prose(chapter.draft.figures)
         cited_ids = set(re.findall(r"C\d+-\d+", prose))
         source_ids = {str(item.get("source_id")) for item in catalog.get("sources", [])
                       if item.get("citation_id") in cited_ids and item.get("source_id")}
-        return _science_review_evidence(dossier, chapter, cited_source_ids=source_ids)
+        return _science_review_evidence(dossier, chapter, cited_source_ids=source_ids,
+                                        max_chars=120_000)
 
     def _science_review(self, module: OutlineModule, version: int,
                         chapter: WriterChapter, dossier_path: Path) -> Path:
         relative = self._fast_root() / module.module_id / f"science_review_v{version}.json"
         if (self.repo.root / relative).is_file():
             return self.repo.root / relative
+        # A resumed Writer draft may already be frozen, so _writer_chapter
+        # returns before reporting a stage.  Name the actual review here.
+        _literature_step(self, module, "science", f"第 {version} 版 · 科学事实审阅")
         dossier = json.loads(dossier_path.read_text(encoding="utf-8"))
         evidence = self._review_evidence(module, chapter, dossier)
         reviews = []
@@ -2063,7 +2375,10 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                 ScienceChecklist, rid,
                 f"fast_science_review_{module.module_id}_v{version}",
                 "独立密封审阅科学事实、证据适用范围、公式与术语；只列实质问题。"
-                "也要检查本章理解所必需的术语是否遗漏、解释是否可独立阅读、"
+                + FORMULA_REVIEW_RULES
+                + FIGURE_REVIEW_RULES
+                + "若缺少的是公式表解释，具体指出词条和缺失的说明，并写入 glossary_corrections。"
+                + "也要检查本章理解所必需的术语是否遗漏、解释是否可独立阅读、"
                 "开头类比是否误导；把具体缺漏或错误列入 glossary_corrections。"
                 "每条问题定位一处正文，说明为何影响结论并给出可核查证据。"
                 "本轮实际 UTC 日期在输入中给出；不得用模型记忆中的系统日期否定它。"
@@ -2085,6 +2400,14 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             data = self._read_json(relative)
             return data["passed"], self.repo.root / relative
         review = json.loads(review_path.read_text(encoding="utf-8"))
+        patch_audit = self.repo.root / "public/literature_report/modules" / module.module_id / (
+            f"writing_v071/writer_v{revision}_local_patch_applied.json"
+        )
+        application_audit = (
+            self._read_json(patch_audit.relative_to(self.repo.root))
+            if patch_audit.is_file() else {}
+        )
+        citation_cleanup = application_audit.get("legacy_citation_cleanup", [])
         evidence = self._review_evidence(
             module, chapter, json.loads(dossier_path.read_text(encoding="utf-8")))
         votes = []
@@ -2098,10 +2421,17 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                 "只判断先前科学异议在当前修订稿中是否已得到实质回应。"
                 "须先核对本轮引用来源及当前 UTC 日期；先前异议本身若因遗漏证据或日期错误"
                 "而不成立，应判为已解决，不要求主笔删去有证据支持的正确表述。"
+                "若 technical_citation_cleanup 记录了无法映射的旧引文标记，清理动作本身不等于科学问题已解决；"
+                "对与先前异议有关的对应正文，仍须判断现有证据是否支持，必要时保留该异议。"
+                "local_revision_application 记录已应用、未应用的修改及主笔对异议的回应。"
+                "技术上跳过某项不代表对应科学异议已解决；以实际修订稿和证据判断。"
+                "建议无需强制采纳；主笔有依据的不采纳理由也应审阅，不要求每条异议都产生文字修改。"
                 "不得提出无关新要求；若仍有实质问题，逐项具体说明。只返回 JSON。",
                 {"prior_sealed_review_group": review,
                  "revised_chapter": chapter.model_dump(mode="json"),
                  "bounded_evidence": evidence,
+                 "technical_citation_cleanup": citation_cleanup,
+                 "local_revision_application": application_audit,
                  "review_date_utc": datetime.now(timezone.utc).date().isoformat()},
             )
             votes.append({"reviewer_id": rid, **vote.model_dump(mode="json")})
@@ -2127,6 +2457,13 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             dossier = json.loads(dossier_path.read_text(encoding="utf-8"))
             evidence = self._review_evidence(module, chapter, dossier)
             prior = json.loads(recheck_path.read_text(encoding="utf-8"))
+            application_path = self.repo.root / "public/literature_report/modules" / module.module_id / (
+                f"writing_v071/writer_v{revision}_local_patch_applied.json"
+            )
+            application_audit = (
+                json.loads(application_path.read_text(encoding="utf-8"))
+                if application_path.is_file() else {}
+            )
             votes = []
             for record in self._reviewers(stage=f"fast_science_evidence_appeal_{module.module_id}_v{revision}"):
                 rid = record["representative_id"]
@@ -2140,9 +2477,11 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                     "旧异议若只是因为有界摘录省略了实际存在的发现，或使用了错误日期，"
                     "应说明所据来源并判已解决；不能把旧票当作事实。"
                     "若仍存在真实科学问题，指出当前稿的准确位置与来源边界。"
+                    "同时审查主笔的异议回应；技术跳过不等于科学通过，不要求强制采纳每条建议。"
                     "resolved 为 true 时，resolved_objection_explanations 至少解释一项；只返回 JSON。",
                     {"initial_sealed_review": json.loads(review_path.read_text(encoding="utf-8")),
                      "prior_recheck": prior,
+                     "local_revision_application": application_audit,
                      "current_chapter": chapter.model_dump(mode="json"),
                      "cited_evidence": evidence,
                      "review_date_utc": datetime.now(timezone.utc).date().isoformat()},
@@ -2196,17 +2535,86 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             )
         resolution = service.resolution(issue_id)
         if resolution is None:
+            from project_ensemble.runtime.fast_science_delegation import try_automatic_fast_science
+            issue = next(item for item in service.open_issues() if item.issue_id == issue_id)
+            resolution = try_automatic_fast_science(
+                self.repo, issue, engine=getattr(self, "engine", None),
+                max_output_tokens=getattr(self, "max_output_tokens", None),
+            )
+        if resolution is None:
             raise LiteratureWritingPaused("FAST_SCIENCE_REVIEW_HUMAN_REQUIRED")
         return resolution
 
+    def _resume_local_format_consultation(
+        self, module: OutlineModule, version: int, *, ignore_skip_ruling: bool = False,
+    ) -> HumanConsultationResolution | None:
+        """Retire format-only pauses; preserve explicit frozen Human decisions."""
+        service = HumanConsultationService(self.repo)
+        root = self.repo.root / "human_private/consultations"
+        prefix = f"HC-FAST-SCIENCE-{module.module_id}-LOCAL-FORMAT-V{version}-"
+        paths = sorted(root.glob(f"{prefix}*.issue.json"),
+                       key=lambda path: (path.stat().st_mtime_ns, path.name))
+        resolved = []
+        for path in paths:
+            issue = HumanConsultationIssue.model_validate_json(path.read_text(encoding="utf-8"))
+            ruling = service.resolution(issue.issue_id)
+            if ruling is not None:
+                if not (ignore_skip_ruling and
+                        ruling.decision == "SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION"):
+                    resolved.append(ruling)
+                continue
+            if (root / f"{issue.issue_id}.withdrawn.json").exists() or (
+                root / f"{issue.issue_id}.superseded.json"
+            ).exists():
+                continue
+            service.withdraw(
+                issue_id=issue.issue_id,
+                reason=(
+                    "格式故障改由逐项校验和排障员处理；无法应用的建议单项跳过，"
+                    "有效修订继续提交。原科学异议仍须科学复核（science re-review）。"
+                    "旧咨询与失败输出保留供追溯。"
+                ),
+            )
+        return resolved[-1] if resolved else None
+
+    @staticmethod
+    def _apply_local_format_ruling(resolution: HumanConsultationResolution) -> None:
+        if resolution.decision == "REWRITE_WHOLE_MODULE":
+            raise FastWholeModuleRewriteRequested
+        if resolution.decision == "SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION":
+            raise FastLocalRepairSkipped(resolution.rationale)
+        if resolution.decision in {"PAUSE_FOR_MANUAL_REVIEW", "KEEP_PAUSED"}:
+            raise LiteratureWritingPaused(
+                "FAST_LOCAL_PATCH_TECHNICAL_REPAIR_HUMAN_REQUIRED"
+                if resolution.decision == "PAUSE_FOR_MANUAL_REVIEW"
+                else "FAST_SCIENCE_REVIEW_HUMAN_REQUIRED"
+            )
+
     def _local_science_repair(self, module: OutlineModule, version: int,
-                              chapter: WriterChapter, recheck_path: Path) -> tuple[Path, WriterChapter]:
+                              chapter: WriterChapter, recheck_path: Path, *,
+                              reopening_after_previous_skip: bool = False) -> tuple[Path, WriterChapter]:
         base = Path("public/literature_report/modules") / module.module_id
         validated_relative = base / "writing_v071" / f"writer_v{version}_validated.json"
         draft_relative = base / "drafts" / f"fast-v{version}.json"
+        audit_relative = base / "writing_v071" / f"writer_v{version}_local_patch_applied.json"
+        result_relative = base / "writing_v071" / f"writer_v{version}_item_revision_result.json"
         validated_path = self.repo.root / validated_relative
+        prior_ruling = self._resume_local_format_consultation(
+            module, version, ignore_skip_ruling=reopening_after_previous_skip,
+        )
         if validated_path.is_file():
             restored = WriterChapter.model_validate(self._read_json(validated_relative))
+            if not (self.repo.root / draft_relative).is_file():
+                _freeze(self, draft_relative, restored.draft)
+            return self.repo.root / draft_relative, restored
+        if prior_ruling is not None:
+            self._apply_local_format_ruling(prior_ruling)
+        if (self.repo.root / result_relative).is_file():
+            committed = self._read_json(result_relative)
+            restored = WriterChapter.model_validate(committed["chapter"])
+            _freeze(self, audit_relative, committed["application_audit"])
+            _freeze(self, validated_relative, restored)
+            _freeze(self, draft_relative, restored.draft)
             return self.repo.root / draft_relative, restored
         objections = list(dict.fromkeys(
             str(problem).strip() for problem in self._local_science_objections(recheck_path)
@@ -2226,6 +2634,179 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
         catalog_path = _effective_chapter_citation_catalog_path(self.repo.root, module.module_id)
         original = chapter.model_dump(mode="python")
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        # The Writer and the validator must see the same term namespace. A
+        # previous chapter's definition is editable by copying its new version
+        # into this chapter; the frozen predecessor is never modified.
+        glossary_root = self.repo.root / "public/literature_report/writing_v071"
+        prior_glossary_paths = sorted(
+            path for path in glossary_root.glob("glossary_after_RM-*.json")
+            if path.stem.removeprefix("glossary_after_") < module.module_id
+        )
+        prior_glossary = (
+            json.loads(prior_glossary_paths[-1].read_text(encoding="utf-8"))
+            if prior_glossary_paths else []
+        )
+        effective_glossary = {
+            str(term["term"]).strip().casefold(): copy.deepcopy(term)
+            for term in prior_glossary
+        }
+        effective_glossary.update({
+            str(term["term"]).strip().casefold(): copy.deepcopy(term)
+            for term in original.get("glossary_additions", [])
+        })
+        citation_pattern = re.compile(r"\[C[0-9]+-[0-9]+\]")
+        citation_marker_pattern = re.compile(r"(?:\[(C[0-9]+-[0-9]+)\]|［(C[0-9]+-[0-9]+)］|【(C[0-9]+-[0-9]+)】)")
+        legacy_packet_marker_pattern = re.compile(
+            r"\[(?P<ascii>RP-[A-Z0-9]+)\]|［(?P<wide>RP-[A-Z0-9]+)］|"
+            r"【(?P<lenticular>RP-[A-Z0-9]+)】|"
+            r"(?<![A-Z0-9-])(?P<bare>RP-[A-Z0-9]+)(?![A-Z0-9-])"
+        )
+        unresolved_citation_placeholder_pattern = re.compile(r"(?:\[来源待核\]|［来源待核］|【来源待核】)")
+        citation_normalization_pattern = re.compile(
+            r"［(?P<wide>C[0-9]+-[0-9]+)］|【(?P<lenticular>C[0-9]+-[0-9]+)】|"
+            r"(?<!\[)(?<!［)(?<!【)\b(?P<bare>C[0-9]+-[0-9]+)\b(?!\])(?!］)(?!】)"
+        )
+        catalog_citation_ids = {
+            source["citation_id"]
+            for source in catalog.get("sources", [])
+            if isinstance(source, dict)
+            and isinstance(source.get("citation_id"), str)
+            and re.fullmatch(r"C[0-9]+-[0-9]+", source["citation_id"])
+        }
+        packet_citations: dict[str, list[str]] = {}
+        for source in catalog.get("sources", []):
+            citation_id = source.get("citation_id")
+            if not isinstance(citation_id, str) or not citation_pattern.fullmatch(
+                f"[{citation_id}]"
+            ):
+                continue
+            for packet_id in source.get("packet_ids", []):
+                if isinstance(packet_id, str):
+                    packet_citations.setdefault(packet_id, []).append(citation_id)
+        citation_restorations: list[dict] = []
+        citation_format_normalizations: list[dict] = []
+        legacy_citation_cleanup: list[dict] = []
+
+        def citations_for(text: str) -> list[str]:
+            citations = [
+                next(group for group in match.groups() if group is not None)
+                for match in citation_marker_pattern.finditer(text)
+            ]
+            citations = [citation_id for citation_id in citations
+                         if citation_id in catalog_citation_ids]
+            for packet_id in re.findall(r"\bRP-[A-Z0-9]+\b", text):
+                citations.extend(packet_citations.get(packet_id, []))
+            return list(dict.fromkeys(citations))
+
+        def clean_legacy_citations(text: str, target: str) -> str:
+            cleanup_by_key: dict[tuple[str, tuple[str, ...]], int] = {}
+
+            def replace_legacy(match: re.Match[str]) -> str:
+                packet_id = next(group for group in match.groups() if group is not None)
+                citation_ids = tuple(packet_citations.get(packet_id, []))
+                status = "MAPPED_TO_CHAPTER_CITATIONS" if citation_ids else "UNMAPPED_LEGACY_MARKER_REMOVED"
+                key = (status, citation_ids)
+                cleanup_by_key[key] = cleanup_by_key.get(key, 0) + 1
+                if not citation_ids:
+                    return ""
+                replacement = " ".join(f"[{citation_id}]" for citation_id in citation_ids)
+                return (" " if match.start() > 0 and text[match.start() - 1] not in " \t\n" else "") + replacement
+
+            cleaned = legacy_packet_marker_pattern.sub(replace_legacy, text)
+            placeholders = list(unresolved_citation_placeholder_pattern.finditer(cleaned))
+            if placeholders:
+                cleanup_by_key[("UNRESOLVED_PLACEHOLDER_REMOVED", ())] = len(placeholders)
+                cleaned = unresolved_citation_placeholder_pattern.sub("", cleaned)
+            if cleanup_by_key:
+                # Keep internal RP identifiers in the immutable source draft;
+                # the public repair audit records only the target and action.
+                legacy_citation_cleanup.extend({
+                    "target": target,
+                    "status": status,
+                    "count": amount,
+                    "citation_ids": list(citation_ids),
+                    "science_review_required": True,
+                } for (status, citation_ids), amount in cleanup_by_key.items())
+            return re.sub(r"[ \t]+([，。；：、,.!?！？])", r"\1", cleaned)
+
+        def normalize_bare_citations(replacement: str, target: str) -> tuple[str, list[str]]:
+            canonical = _normalize_chapter_citation_ids(replacement, catalog)
+            if canonical != replacement:
+                citation_format_normalizations.append({
+                    "target": target, "operation": "CANONICALIZE_CITATION_ZERO_PADDING",
+                })
+                replacement = canonical
+            marker_ids = [
+                next(group for group in match.groups() if group is not None)
+                for match in citation_normalization_pattern.finditer(replacement)
+            ]
+            normalized_ids = list(dict.fromkeys(marker_ids))
+            unknown = sorted(set(normalized_ids) - catalog_citation_ids)
+            if unknown:
+                raise ValueError(
+                    f"nonstandard citation markers reference IDs outside the chapter catalog in {target}: {unknown}"
+                )
+            if normalized_ids:
+                normalized = citation_normalization_pattern.sub(
+                    lambda match: "[" + next(
+                        group for group in match.groups() if group is not None
+                    ) + "]",
+                    replacement,
+                )
+                if normalized != replacement:
+                    citation_format_normalizations.append({
+                        "target": target,
+                        "citation_ids": normalized_ids,
+                    })
+                return normalized, normalized_ids
+            return replacement, []
+
+        def retain_citations(replacement: str, previous_text: str, target: str) -> str:
+            replacement, _normalized_ids = normalize_bare_citations(replacement, target)
+            referenced = set(re.findall(r"\[(C[0-9]+-[0-9]+)\]", replacement))
+            unknown = sorted(referenced - catalog_citation_ids)
+            if unknown:
+                raise ValueError(f"{target} 的引用编号不在本章文献目录中：{unknown}")
+            for source in catalog.get("sources", []):
+                if source.get("citation_id") in referenced:
+                    packets = source.get("packet_ids", [])
+                    if not packets:
+                        raise ValueError(f"{target} 的引用缺少证据映射：{source['citation_id']}")
+                    self._validate_citations(packets)
+            previous_citations = citations_for(previous_text)
+            previous_has_any_marker = bool(
+                citation_marker_pattern.search(previous_text)
+                or re.search(r"\bRP-[A-Z0-9]+\b", previous_text)
+            )
+            if not previous_has_any_marker:
+                return replacement
+            replacement_citations = citations_for(replacement)
+            if previous_citations and not replacement_citations:
+                citation_ids = previous_citations
+            elif previous_citations or replacement_citations:
+                return replacement
+            else:
+                orphan_ids = list(dict.fromkeys(
+                    packet_id for packet_id in re.findall(r"\bRP-[A-Z0-9]+\b", previous_text)
+                    if packet_id not in packet_citations
+                ))
+                legacy_citation_cleanup.append({
+                    "target": target,
+                    "status": "UNMAPPED_LEGACY_MARKER_REMOVED_FROM_REPLACED_TEXT",
+                    "count": len(orphan_ids),
+                    "citation_ids": [],
+                    "science_review_required": True,
+                })
+                return replacement
+            citation_restorations.append({
+                "target": target,
+                "citation_ids": citation_ids,
+            })
+            return replacement.rstrip() + " " + " ".join(
+                f"[{citation_id}]" for citation_id in citation_ids
+            )
+
+
         all_context_text = chapter.draft.body_markdown + "\n" + chapter.draft.short_summary + "\n" + "\n".join(objections)
         mentioned_packet_ids = set(re.findall(r"\bRP-[A-Z0-9]+\b", all_context_text))
         reader_facing_citation_catalog = [
@@ -2236,11 +2817,27 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                 "doi": source.get("doi"),
             }
             for source in catalog.get("sources", [])
-            if source.get("citation_id") and (
+            if isinstance(source, dict) and source.get("citation_id") and (
                 not mentioned_packet_ids
                 or mentioned_packet_ids.intersection(source.get("packet_ids", []))
             )
         ]
+        unmapped_packet_ids = mentioned_packet_ids - packet_citations.keys()
+        if unmapped_packet_ids:
+            # An orphan RP handle cannot narrow the relevant source catalog.
+            # Give the Writer the bounded chapter catalog so it can select a
+            # genuinely applicable source or qualify/remove the unsupported
+            # claim; it must not guess an ID mapping.
+            reader_facing_citation_catalog = [
+                {
+                    "citation_id": source["citation_id"], "title": source.get("title", ""),
+                    "authors": source.get("authors", []),
+                    "publication_year": source.get("publication_year"),
+                    "doi": source.get("doi"),
+                }
+                for source in catalog.get("sources", [])
+                if isinstance(source, dict) and source.get("citation_id")
+            ]
         patch_files = list((self.repo.root / base / "writing_v071").glob(
             f"writer_v{version}_local_patch_c*_a*.json"
         ))
@@ -2258,259 +2855,299 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             "正文按 editable_body_paragraphs 中的编号提供；请勿依赖原句全文搜索。"
         )
         patch_context["editable_body_paragraphs"] = [
-            {"paragraph_number": index, "text": paragraph}
+            {
+                "paragraph_number": index,
+                "text": paragraph,
+                "citations_to_preserve": citations_for(paragraph),
+            }
             for index, (_start, _end, paragraph) in enumerate(body_paragraphs, 1)
         ]
         patch_context["reader_facing_citation_catalog"] = reader_facing_citation_catalog
+        patch_context["editable_glossary_entries"] = list(effective_glossary.values())
+        patch_context["editable_inference_labels"] = [
+            {"label_index": index, "expected_text": text}
+            for index, text in enumerate(chapter.draft.inference_labels)
+        ]
+        patch_context["editable_figures"] = chapter.draft.figures
+        # Keep each editable value once. The full paragraph inventory, original
+        # objections, source catalog and term definitions remain available.
+        for redundant in ("glossary_additions", "outline_deviations", "revision_responses"):
+            patch_context.pop(redundant, None)
+        for redundant in ("inference_labels", "figures"):
+            patch_context["draft"].pop(redundant, None)
+        # The AI decides only how to respond to this consultation. Its reasoned
+        # objection dispositions guide the Writer, while all original objections
+        # remain in numbered_objections for independent scientific recheck.
+        from project_ensemble.runtime.fast_science_delegation import science_rulings_for_review
+        ai_rulings = science_rulings_for_review(self.repo, module.module_id, recheck_path)
+        if ai_rulings:
+            patch_context["ai_science_rulings"] = ai_rulings
+        if unmapped_packet_ids:
+            patch_context["legacy_citation_note"] = (
+                "部分冻结旧引文没有本章目录映射。它们会在提交后由程序移除并记录；"
+                "修订时如目录中确有直接支持该句的来源，请改用对应 C ID；若无直接支持，"
+                "应收窄或删除该来源依赖的断言。不要猜测旧编号与 C ID 的对应关系。"
+            )
         # Old frozen chapters and reviewer notes can still contain internal
         # packet handles. Give the writer only reader-facing source IDs and
         # neutral placeholders; the immutable evidence links stay on our side.
         patch_context = _writer_visible_payload(patch_context, catalog)
-        last_problem = ""
-        for cycle in count(first_cycle):
-            for attempt in range(1, 4):
-                relative = (base / "writing_v071" /
-                            f"writer_v{version}_local_patch_c{cycle:02d}_a{attempt:02d}.json")
-                proposal = _frozen_or_call(
-                    self, relative, FastLocalScienceRepair, "WRITER",
-                    f"fast_local_science_repair_{module.module_id}_v{version}_c{cycle}_a{attempt}",
-                    "只处理列出的科学异议，不重写整章。逐条提交精确的旧文本与替换文本；"
-                    "正文按 editable_body_paragraphs 的 paragraph_number 定位；优先用该编号和 new_text 替换整段，"
-                    "无需复制 old_text。若提供 old_text，它必须与编号对应的整段原文一致。"
-                    "同一段落涉及多条异议时合并到同一修改并列出全部 objection_numbers；每段只提交一次替换。"
-                    "如需改写完整短摘要，使用 target_field=short_summary、replace_entire_field=true 和 new_text；"
-                    "不要复制旧摘要作为定位锚点。已有术语表用 glossary_edits 按 term 和 field（explanation 或 formula）定位，"
-                    "可选 expected_text 用于确认当前内容；不得用整段全文搜索来定位重复术语。"
-                    "所有正文和短摘要引用只能使用 reader_facing_citation_catalog 中的 C 文献编号。"
-                    "历史引用占位符 [来源待核] 必须结合相邻论述及目录改成正确 C 编号；不得保留占位符、猜造编号或输出内部证据包编号。"
-                    "若修订段落或完整摘要原先含有引用，替换后须保留相应 C 文献引文；系统会据这些引文重建证据来源列表。"
-                    "如果异议要求补充当前不存在的术语表词条，可在 glossary_additions 中提交新词条及其 objection_numbers；"
-                    "新词条不得与现有词条重复，定义只能依据当前模块已核查资料，并在有来源时填写本章目录中的 C 文献编号。"
-                    "若证据不足以给出可靠定义，应通过局部正文修改收窄或解释用法，不得猜测。"
-                    "可以收窄或撤回未获证实的断言，不得增加未核实事实、新来源或新的研究范围。"
-                    "替换后的正文与释义面向研究读者，不得照搬任务指令中的内部流程用语；避免把‘核对、条目、登记、接口、交付、缺口’等词当作学术概念使用，"
-                    "也避免生造复杂复合名词。"
-                    "每条异议至少由一项局部文字替换或一项新增词条处理；单项处理可对应多条异议。"
-                    "新增词条也须明确关联至少一条异议。保持其他段落、标题、引文及未涉及的术语表条目原样。"
-                    "只返回 JSON。",
-                    {"current_draft": patch_context,
-                     "numbered_objections": _writer_visible_payload([
-                         {"number": index, "objection": problem}
-                         for index, problem in enumerate(objections, 1)
-                     ], catalog),
-                     "previous_attempt_problem": _writer_visible_payload(last_problem, catalog)},
-                )
-                try:
-                    changed = dict(original)
-                    covered: set[int] = set()
-                    paragraph_replacements: list[tuple[int, int, str]] = []
-                    used_paragraphs: set[int] = set()
-                    replaced_fields: set[str] = set()
-                    for edit in proposal.edits:
-                        if any(number > len(objections) for number in edit.objection_numbers):
-                            raise ValueError("edit references an objection outside the frozen list")
-                        if edit.replace_entire_field:
-                            assert edit.target_field == "short_summary"
-                            if edit.target_field in replaced_fields:
-                                raise ValueError("short_summary has multiple whole-field replacements")
-                            changed["draft"][edit.target_field] = edit.new_text
-                            replaced_fields.add(edit.target_field)
-                            covered.update(edit.objection_numbers)
-                            continue
-                        if edit.paragraph_number is None:
-                            continue
-                        paragraph_number = edit.paragraph_number
-                        if paragraph_number > len(body_paragraphs):
-                            raise ValueError(
-                                f"paragraph_number {paragraph_number} is outside the editable body"
-                            )
-                        if paragraph_number in used_paragraphs:
-                            raise ValueError(
-                                f"body paragraph {paragraph_number} has multiple replacements"
-                            )
-                        start, end, current_paragraph = body_paragraphs[paragraph_number - 1]
-                        if edit.old_text is not None and edit.old_text.strip() != current_paragraph.strip():
-                            raise ValueError(
-                                f"old_text does not match editable body paragraph {paragraph_number}"
-                            )
-                        if re.search(r"\bRP-[A-Z0-9]+\b", current_paragraph) and not re.search(
-                            r"\[C[0-9]+-[0-9]+\]", edit.new_text,
-                        ):
-                            raise ValueError(
-                                f"replacement for cited paragraph {paragraph_number} must retain a C citation"
-                            )
-                        used_paragraphs.add(paragraph_number)
-                        paragraph_replacements.append((start, end, edit.new_text))
-                        covered.update(edit.objection_numbers)
-                    for start, end, replacement in sorted(
-                        paragraph_replacements, key=lambda item: item[0], reverse=True,
-                    ):
-                        body = changed["draft"]["body_markdown"]
-                        changed["draft"]["body_markdown"] = body[:start] + replacement + body[end:]
+        # One Writer proposal per science revision. Failed operations are
+        # item-local and never trigger a new Writer cycle or Human docket.
+        cycle, attempt = first_cycle, 1
+        # Stable across interruptions: do not interpret a committed proposal as
+        # another failed cycle and charge for another Writer call on resume.
+        relative = base / "writing_v071" / f"writer_v{version}_item_revision_proposal.json"
+        proposal = _local_revision_or_empty(
+            self, relative, FastLocalScienceRepair, "WRITER",
+            f"fast_local_science_repair_{module.module_id}_v{version}_c{cycle}_a{attempt}",
+            "只处理列出的科学异议，不重写整章。逐条提交精确的旧文本与替换文本；"
+            "正文按 editable_body_paragraphs 的 paragraph_number 定位；优先用该编号和 new_text 替换整段，"
+            "无需复制 old_text。若提供 old_text，它必须与编号对应的整段原文一致。"
+            "同一段落涉及多条异议时合并到同一修改并列出全部 objection_numbers；每段只提交一次替换。"
+            "如需改写完整短摘要，使用 target_field=short_summary、replace_entire_field=true 和 new_text；"
+            "不要复制旧摘要作为定位锚点。editable_glossary_entries 是当前可编辑的完整术语清单，包含前章继承的词条。"
+            "术语修订优先使用 glossary_entries：按 term 提交完整的新定义及 objection_numbers；"
+            "系统按词名更新已有词条或加入新词条，无需判断这个词属于哪一章，也无需区分新增与修改。"
+            "只修改一个栏位时，也可用 glossary_edits 按 term 和 field（explanation 或 formula）定位，"
+            "可选 expected_text 用于确认当前内容；不得用整段全文搜索来定位重复术语。"
+            "所有正文和短摘要引用只能使用 reader_facing_citation_catalog 中的 C 文献编号。"
+            "每条文献引文必须严格使用方括号形式，例如 [C00001-00049]；不得将裸编号放在圆括号中。"
+            "历史引用占位符 [来源待核] 必须结合相邻论述及目录改成正确 C 编号；不得保留占位符、猜造编号或输出内部证据包编号。"
+            "若本章目录没有旧引文的映射，只能在目录确有直接适用来源时换成该 C 编号；否则收窄或撤回依赖它的断言。程序会移除剩余无映射旧标记并记入审计，全部原科学异议仍必须再次复核。"
+            "若修订段落或完整摘要原先含有引用，替换后须保留相应 C 文献引文；系统会据这些引文重建证据来源列表。"
+            "编号段落旁提供的 citations_to_preserve 是该段原有依据对应的 C 编号；若没有改用目录中的其他适用 C 编号，请在新段落中保留它们。"
+            "同一词名只提交一份最终定义；glossary_entries 中已有词条的新定义会替代当前定义，不会生成重复词条。"
+            "定义只能依据已核查资料，在有来源时填写本章目录中的 C 文献编号；已有词条也可保留其现有来源编号。"
+            "若证据不足以给出可靠定义，应通过局部正文修改收窄或解释用法，不得猜测。"
+            "若科学异议直接指出 draft.inference_labels 中某标签与正文矛盾，可用 inference_label_edits 修订该标签；"
+            "配图异议用 figure_edits 按 figure_id 修改，expected_figure 复制 editable_figures 中当前完整规格；"
+            "replacement 给出同编号的完整修正规格，或 null 删除该图。不要只改正文留下配图矛盾。"
+            "label_index 是从 0 开始的数组索引，expected_text 必须逐字匹配 editable_inference_labels 中对应标签，"
+            "new_text 只能修正该标签，未涉及的标签必须保留。"
+            "可以收窄或撤回未获证实的断言，不得增加未核实事实、新来源或新的研究范围。"
+            "替换后的正文与释义面向研究读者，不得照搬任务指令中的内部流程用语；避免把‘核对、条目、登记、接口、交付、缺口’等词当作学术概念使用，"
+            "也避免生造复杂复合名词。"
+            "逐条评估异议；有依据不采纳或无需改文时，用 objection_responses 给出 objection_number 和 response，交科学复核判断。"
+            "若输入含 ai_science_rulings，请参考其逐条理由；该代裁未替代科学复核，仍须处理全部原异议。"
+            "词条修订也须明确关联至少一条异议。保持其他段落、标题、引文及未涉及的术语表条目原样。"
+            + ("\n" + writer_figure_skill() + "\n" if chapter.draft.figures else "")
+            + "只返回 JSON。",
+            {"current_draft": patch_context,
+             "numbered_objections": _writer_visible_payload([
+                 {"number": index, "objection": problem}
+                 for index, problem in enumerate(objections, 1)
+             ], catalog),
+             "previous_attempt_problem": ""},
+        )
+        chapter_sources = {
+            item["citation_id"]: item for item in catalog.get("sources", [])
+            if isinstance(item, dict) and item.get("citation_id")
+        }
 
-                    for edit in proposal.edits:
-                        if edit.paragraph_number is not None or edit.replace_entire_field:
-                            continue
-                        assert edit.old_text is not None
-                        locations: list[tuple[str, int | None, str]] = []
-                        fields = (edit.target_field,) if edit.target_field else (
-                            "body_markdown", "short_summary",
-                        )
-                        for field in fields:
-                            assert field is not None
-                            if changed["draft"][field].count(edit.old_text) == 1:
-                                locations.append((field, None, field))
-                        for index, term in enumerate(changed.get("glossary_additions", [])):
-                            for field in ("explanation", "formula"):
-                                value = term.get(field)
-                                if isinstance(value, str) and value.count(edit.old_text) == 1:
-                                    locations.append((field, index, f"glossary_additions[{index}].{field}"))
-                        if len(locations) != 1:
-                            raise ValueError("old_text must occur exactly once in one editable field")
-                        field, index, _label = locations[0]
-                        target = changed["draft"] if index is None else changed["glossary_additions"][index]
-                        target[field] = target[field].replace(edit.old_text, edit.new_text, 1)
-                        covered.update(edit.objection_numbers)
+        def validate_entry(entry, previous):
+            entry.source_citation_ids = [
+                _normalize_chapter_citation_ids(cid, catalog) for cid in entry.source_citation_ids
+            ]
+            retained = set(previous.get("source_citation_ids", []))
+            new_ids = set(entry.source_citation_ids) - retained
+            unknown = sorted(new_ids - chapter_sources.keys())
+            if unknown:
+                raise ValueError(f"glossary sources are outside the chapter catalog: {unknown}")
+            packets = []
+            for citation_id in new_ids:
+                linked = chapter_sources[citation_id].get("packet_ids", [])
+                if not linked:
+                    raise ValueError(f"glossary source has no evidence packets: {citation_id}")
+                packets.extend(linked)
+            self._validate_citations(packets)
 
-                    if "short_summary" in replaced_fields:
-                        if (re.search(r"\bRP-[A-Z0-9]+\b", chapter.draft.short_summary)
-                                and not re.search(r"\[C[0-9]+-[0-9]+\]", changed["draft"]["short_summary"])):
-                            raise ValueError("replacement for cited short_summary must retain a C citation")
+        def validate_figure(spec):
+            _body, accepted, diagnostics = prepare_figures(
+                f"[[FIGURE:{spec.id}]]", [spec.model_dump(mode="json")], catalog)
+            if diagnostics:
+                raise ValueError(diagnostics[0]["reason"])
+            return FigureSpec.model_validate(accepted[0])
 
-                    for edit in proposal.glossary_edits:
-                        if any(number > len(objections) for number in edit.objection_numbers):
-                            raise ValueError(
-                                "glossary edit references an objection outside the frozen list"
-                            )
-                        matches = [
-                            term for term in changed.get("glossary_additions", [])
-                            if str(term.get("term", "")).casefold() == edit.term.casefold()
-                        ]
-                        if len(matches) != 1:
-                            raise ValueError(
-                                f"glossary term must identify exactly one existing entry: {edit.term}"
-                            )
-                        current_text = matches[0].get(edit.field)
-                        if not isinstance(current_text, str):
-                            raise ValueError(
-                                f"glossary field {edit.field} is not editable for {edit.term}"
-                            )
-                        if edit.expected_text is not None and current_text != edit.expected_text:
-                            raise ValueError(
-                                f"glossary field changed since the patch context: {edit.term}.{edit.field}"
-                            )
-                        matches[0][edit.field] = edit.new_text
-                        covered.update(edit.objection_numbers)
-
-                    existing_terms = {
-                        str(term.get("term", "")).casefold()
-                        for term in changed.get("glossary_additions", [])
-                    }
-                    glossary_root = self.repo.root / "public/literature_report/writing_v071"
-                    prior_glossary_paths = sorted(
-                        path for path in glossary_root.glob("glossary_after_RM-*.json")
-                        if path.stem.removeprefix("glossary_after_") < module.module_id
-                    )
-                    if prior_glossary_paths:
-                        prior_glossary = json.loads(
-                            prior_glossary_paths[-1].read_text(encoding="utf-8")
-                        )
-                        existing_terms.update(
-                            str(term.get("term", "")).casefold()
-                            for term in prior_glossary
-                        )
-                    chapter_sources = {
-                        source["citation_id"]: source
-                        for source in catalog.get("sources", [])
-                        if isinstance(source, dict) and source.get("citation_id")
-                    }
-                    for addition in proposal.glossary_additions:
-                        if any(number > len(objections) for number in addition.objection_numbers):
-                            raise ValueError(
-                                "glossary addition references an objection outside the frozen list"
-                            )
-                        entry = addition.entry
-                        normalized_term = entry.term.casefold()
-                        if normalized_term in existing_terms:
-                            raise ValueError(
-                                "glossary term already exists; edit its current definition instead: "
-                                f"{entry.term}"
-                            )
-                        existing_terms.add(normalized_term)
-                        unknown_citations = sorted(set(entry.source_citation_ids) - chapter_sources.keys())
-                        if unknown_citations:
-                            raise ValueError(
-                                "glossary addition cites sources outside the chapter catalog: "
-                                f"{unknown_citations}"
-                            )
-                        missing_packets = sorted(
-                            citation_id for citation_id in entry.source_citation_ids
-                            if not chapter_sources[citation_id].get("packet_ids")
-                        )
-                        if missing_packets:
-                            raise ValueError(
-                                "glossary addition sources have no linked evidence packets: "
-                                f"{missing_packets}"
-                            )
-                        linked_packet_ids = [
-                            packet_id for citation_id in entry.source_citation_ids
-                            for packet_id in chapter_sources[citation_id]["packet_ids"]
-                        ]
-                        self._validate_citations(linked_packet_ids)
-                        changed.setdefault("glossary_additions", []).append(
-                            entry.model_dump(mode="python")
-                        )
-                        covered.update(addition.objection_numbers)
-                    if covered != set(range(1, len(objections) + 1)):
-                        raise ValueError("every current objection needs a local edit")
-                    repaired = WriterChapter.model_validate(changed)
-                    draft = repaired.draft
-                    legacy_citations_before = set(re.findall(
-                        r"\bRP-[A-Z0-9]+\b",
-                        chapter.draft.body_markdown + "\n" + chapter.draft.short_summary,
-                    ))
-                    legacy_citations_after = re.findall(
-                        r"\bRP-[A-Z0-9]+\b", draft.body_markdown + "\n" + draft.short_summary,
-                    )
-                    if legacy_citations_before and legacy_citations_after:
-                        raise ValueError(
-                            "replace every legacy packet marker in the body and short summary with a C citation"
-                        )
-                    draft = self._validate_chapter_source_citations(
-                        module, draft, catalog_path,
-                        previous_draft=None if legacy_citations_before else chapter.draft,
-                    )
-                    self._validate_citations(draft.cited_packet_ids)
-                except ValueError as exc:
-                    last_problem = str(exc)
-                    continue
-                repaired = repaired.model_copy(update={"draft": draft})
-                _freeze(self, validated_relative, repaired)
-                _freeze(self, draft_relative, draft)
-                _freeze(self, base / "writing_v071" / f"writer_v{version}_local_patch_applied.json", {
-                    "source_draft_path": str(base / "writing_v071" /
-                                             f"writer_v{version - 1}_validated.json"),
-                    "source_sha256": hashlib.sha256(chapter.model_dump_json().encode()).hexdigest(),
-                    "patch_path": str(relative),
-                    "objections": objections,
-                    "result_sha256": hashlib.sha256(repaired.model_dump_json().encode()).hexdigest(),
-                    "policy": "TARGETED_TEXT_AND_GLOSSARY_PATCHES_ONLY",
-                })
-                return self.repo.root / draft_relative, repaired
-            decision = self._consult(
-                f"HC-FAST-SCIENCE-{module.module_id}-LOCAL-FORMAT-V{version}-C{cycle}",
-                "FAST_SCIENCE_REVIEW",
-                "局部修订连续三次未能精确定位或通过格式核验。可换模型重试局部修订、"
-                "改为整章重写，或保持暂停。",
-                ["RETRY_WRITER_LOCAL_REPAIR", "REWRITE_WHOLE_MODULE", "PAUSE_FOR_MANUAL_REVIEW"],
-                {"module_id": module.module_id,
-                 "recheck_path": str(recheck_path.relative_to(self.repo.root)),
-                 "last_problem": last_problem},
+        repaired, item_audit = _apply_local_science_items(
+            chapter, proposal, effective_glossary, len(objections),
+            retain_citations, validate_entry, validate_figure,
+        )
+        initial_rejections = copy.deepcopy(item_audit["rejected_items"])
+        technician_audit = {"status": "NOT_NEEDED"}
+        manifest_path = self.repo.root / "identity_private/meeting_manifest.json"
+        technician_configured = manifest_path.is_file() and json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        ).get("technician_model")
+        if initial_rejections and technician_configured:
+            repair_relative = (
+                Path("audit_private/technician/local_science_items") / module.module_id
+                / f"writer_v{version}_c{cycle:02d}.json"
             )
-            if decision.decision == "REWRITE_WHOLE_MODULE":
-                raise FastWholeModuleRewriteRequested
-            if decision.decision != "RETRY_WRITER_LOCAL_REPAIR":
-                raise LiteratureWritingPaused("FAST_SCIENCE_REVIEW_HUMAN_REQUIRED")
+            groups = ("edits", "glossary_edits", "glossary_entries", "inference_label_edits", "figure_edits")
+            def item_payload(item):
+                return item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+
+            failed_items = [
+                {**item, "suggestion": item_payload(getattr(proposal, item["group"])[item["index"]])}
+                for item in initial_rejections
+            ]
+
+            def content_key(group, item):
+                # Technician can change routing, never scientific wording or evidence.
+                payload = item_payload(item)
+                if not isinstance(payload, dict):
+                    return group, json.dumps(payload, sort_keys=True, ensure_ascii=False)
+                content = {"objection_numbers": payload.get("objection_numbers")}
+                if group == "glossary_entries":
+                    content["entry"] = payload.get("entry")
+                elif group == "figure_edits":
+                    content["replacement"] = payload.get("replacement")
+                else:
+                    content["new_text"] = payload.get("new_text")
+                    if group == "glossary_edits":
+                        content["field"] = payload.get("field")
+                return group, json.dumps(content, sort_keys=True, ensure_ascii=False)
+
+            try:
+                self.engine.progress.info(
+                    f"{module.module_id} · 排障员仅处理未能应用的修订项；有效修改已保留"
+                )
+                corrected = _frozen_or_call(
+                    self, repair_relative, FastLocalScienceRepair, "TECHNICIAN",
+                    f"fast_local_science_technician_items_{module.module_id}_v{version}_c{cycle}",
+                    "只修复 failed_items 中的定位与格式问题。正文用提供的段落编号，术语用提供的词名，"
+                    "推断标签用给定的零起始 label_index 与 expected_text。"
+                    "仅返回能修好的失败项，不返回已成功的修改；无法修复的项直接省略。"
+                    "不得改写任何 new_text、词条定义、公式、文献编号或 objection_numbers；"
+                    "不得提出新科学内容。只可修正定位信息，或省略冲突项。只返回 JSON。",
+                    {"failed_items": failed_items,
+                     "editable_body_paragraphs": patch_context["editable_body_paragraphs"],
+                     "editable_glossary_entries": patch_context["editable_glossary_entries"],
+                     "editable_inference_labels": patch_context["editable_inference_labels"],
+                     "editable_figures": patch_context["editable_figures"]},
+                )
+                allowed = [
+                    content_key(item["group"], getattr(proposal, item["group"])[item["index"]])
+                    for item in initial_rejections
+                ]
+                combined = {group: [] for group in groups}
+                for item in item_audit["accepted_items"]:
+                    combined[item["group"]].append(getattr(proposal, item["group"])[item["index"]])
+                technician_item_positions = []
+                for group in groups:
+                    for item in getattr(corrected, group):
+                        key = content_key(group, item)
+                        if key not in allowed:
+                            raise ValueError("Technician changed scientific content or returned an unrequested item")
+                        allowed.remove(key)
+                        technician_item_positions.append((group, len(combined[group])))
+                        combined[group].append(item)
+                combined["objection_responses"] = proposal.objection_responses
+                repaired, item_audit = _apply_local_science_items(
+                    chapter, FastLocalScienceRepair(**combined), effective_glossary,
+                    len(objections), retain_citations, validate_entry, validate_figure,
+                )
+                accepted_positions = {
+                    (item["group"], item["index"]) for item in item_audit["accepted_items"]
+                }
+                applied_repair_count = sum(position in accepted_positions
+                                           for position in technician_item_positions)
+                returned_but_unapplied = len(technician_item_positions) - applied_repair_count
+                unresolved_repair_count = len(allowed) + returned_but_unapplied
+                technician_status = (
+                    "COMPLETED" if unresolved_repair_count == 0 else
+                    "PARTIALLY_COMPLETED" if applied_repair_count else
+                    "NO_REPAIR_APPLIED"
+                )
+                technician_audit = {
+                    "status": technician_status,
+                    "repair_path": str(repair_relative),
+                    "repaired_item_count": applied_repair_count,
+                    "omitted_item_count": unresolved_repair_count,
+                    "returned_but_unapplied_item_count": returned_but_unapplied,
+                }
+            except (ValueError, ProviderError, RepresentativeUnavailableError,
+                    ResearchQualityControlError, InputContextLimitError,
+                    OutputLimitReachedError, EmptyModelOutputError) as exc:
+                technician_audit = {"status": "FAILED_ITEMS_SKIPPED", "repair_path": str(repair_relative),
+                                    "reason": f"{type(exc).__name__}: {exc}"}
+        elif initial_rejections:
+            technician_audit = {"status": "NOT_CONFIGURED; FAILED_ITEMS_SKIPPED"}
+
+        draft = repaired.draft
+        try:
+            draft = draft.model_copy(update={
+                "body_markdown": clean_legacy_citations(draft.body_markdown, "body_markdown"),
+                "short_summary": clean_legacy_citations(draft.short_summary, "short_summary"),
+            })
+            legacy_before = bool(re.search(
+                r"\bRP-[A-Z0-9]+\b", chapter.draft.body_markdown + "\n" + chapter.draft.short_summary,
+            ))
+            if legacy_before:
+                draft = draft.model_copy(update={"cited_packet_ids": []})
+            draft = self._validate_chapter_source_citations(
+                module, draft, catalog_path,
+                previous_draft=None if legacy_before else chapter.draft,
+            )
+            self._validate_citations(draft.cited_packet_ids)
+        except ValueError as exc:
+            # Retain the frozen body if its provenance cannot be reconstructed.
+            # Independent glossary corrections still proceed to scientific review.
+            draft = chapter.draft.model_copy(deep=True)
+            reverted = [item for item in item_audit["accepted_items"] if item["group"] == "edits"]
+            item_audit["accepted_items"] = [
+                item for item in item_audit["accepted_items"] if item["group"] != "edits"
+            ]
+            item_audit["rejected_items"].extend(
+                {**item, "reason": "正文来源校验未通过，已回退该项：" + str(exc)}
+                for item in reverted
+            )
+            item_audit["rejected_items"].append({
+                "group": "draft_provenance", "reason": str(exc),
+                "objection_numbers": list(range(1, len(objections) + 1)),
+            })
+            covered = {number for item in item_audit["accepted_items"] for number in item["objection_numbers"]}
+            item_audit["objections_without_applied_edit"] = sorted(set(range(1, len(objections) + 1)) - covered)
+        repaired = repaired.model_copy(update={"draft": draft})
+        if prompt_contract_version(self.repo.root) >= 2:
+            repaired = audit_math_round(
+                self, "WRITER", f"fast_writer_{module.module_id}_v{version}_completed_round", repaired,
+            )
+            draft = repaired.draft
+        proposal_failure_path = relative.with_name(relative.stem + "_failure.json")
+        application_audit = {
+            "source_draft_path": str(base / "writing_v071" / f"writer_v{version - 1}_validated.json"),
+            "source_sha256": hashlib.sha256(chapter.model_dump_json().encode()).hexdigest(),
+            "patch_path": str(relative),
+            "proposal_failure": (
+                self._read_json(proposal_failure_path)
+                if (self.repo.root / proposal_failure_path).is_file() else None
+            ),
+            "objections": objections,
+            "result_sha256": hashlib.sha256(repaired.model_dump_json().encode()).hexdigest(),
+            "policy": "APPLY_VALID_ITEMS; TECHNICIAN_REPAIRS_FAILED_ITEMS; SKIP_UNAPPLICABLE_ITEMS; SCIENCE_RECHECK_REQUIRED",
+            **item_audit,
+            "initial_rejected_items": initial_rejections,
+            "technician_item_repair": technician_audit,
+            "objection_responses": [item.model_dump(mode="json") for item in proposal.objection_responses],
+            "citation_restorations": citation_restorations,
+            "citation_format_normalizations": citation_format_normalizations,
+            "legacy_citation_cleanup": legacy_citation_cleanup,
+        }
+        # One durable result contains both content and its disposition. A crash
+        # while publishing derived files never reruns Writer/Technician work.
+        _freeze(self, result_relative, {
+            "chapter": repaired.model_dump(mode="json"), "application_audit": application_audit,
+        })
+        _freeze(self, audit_relative, application_audit)
+        _freeze(self, validated_relative, repaired)
+        _freeze(self, draft_relative, draft)
+        if initial_rejections or item_audit["rejected_items"]:
+            self.engine.progress.info(
+                f"{module.module_id} · 修订已逐项处理：有效修改已保留，未应用项已记录；继续复核原科学异议"
+            )
+        return self.repo.root / draft_relative, repaired
 
     def _local_science_objections(self, source_path: Path) -> list[str]:
         """Read either an initial sealed checklist or a later recheck docket."""
@@ -2552,13 +3189,198 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             )
         return passed, recheck_path
 
+    def _reopen_frozen_limited_module(
+        self, outline: FrozenResearchOutline, module: OutlineModule, index: int,
+        dossier_path: Path, frozen_outcome: dict, prior_outcome_path: Path,
+        outcome_revision: int,
+    ) -> dict:
+        """Offer an explicit, append-only return to science revision after a limited freeze."""
+        base = Path("public/literature_report/modules") / module.module_id
+        destination = base / f"module_outcome_revision_{outcome_revision}.json"
+        destination_path = self.repo.root / destination
+        if destination_path.is_file():
+            return self._read_json(destination)
+
+        service = HumanConsultationService(self.repo)
+        attempt = 1
+        while True:
+            issue_id = (
+                f"HC-FAST-SCIENCE-{module.module_id}-REOPEN-REVISION-"
+                f"{outcome_revision:02d}-TRY-{attempt:02d}"
+            )
+            prior_resolution = service.resolution(issue_id)
+            if prior_resolution is None or prior_resolution.decision == "REOPEN_FOR_SCIENCE_REVISION":
+                break
+            # KEEP is immutable. A later resume may still explicitly request a
+            # new revision, so each completed KEEP receives a successor docket.
+            attempt += 1
+
+        decision = self._consult(
+            issue_id,
+            "FAST_SCIENCE_REVISION_REOPEN",
+            (
+                f"{module.module_id} 已冻结为‘带未解决科学异议继续’，因为此前的修订没有完成。"
+                "现在可以明确要求恢复科学修订：原异议、旧稿和旧 Human 决定均保留；"
+                "系统将另存新稿，并对原科学异议重新复核。也可以继续沿用旧稿及其限制说明。"
+            ),
+            ["REOPEN_FOR_SCIENCE_REVISION", "KEEP_CURRENT_LIMITATION_AND_CONTINUE"],
+            {
+                "module_id": module.module_id,
+                "prior_outcome_path": str(prior_outcome_path),
+                "prior_science_status": frozen_outcome.get("local_science_check_status"),
+                "new_outcome_path": str(destination),
+            },
+        )
+        if decision.decision == "KEEP_CURRENT_LIMITATION_AND_CONTINUE":
+            return frozen_outcome
+        if decision.decision != "REOPEN_FOR_SCIENCE_REVISION":
+            raise ValueError("unknown frozen-module science revision decision")
+
+        self._v071_progress = (index, len(outline.modules))
+        approved = self._effective_fast_outline(module.module_id)
+        writing_root = self.repo.root / base / "writing_v071"
+        validated = []
+        for path in writing_root.glob("writer_v*_validated.json"):
+            match = re.fullmatch(r"writer_v(\d+)_validated\.json", path.name)
+            if match:
+                validated.append((int(match.group(1)), path))
+        if not validated:
+            raise LiteratureWritingPaused("FAST_SCIENCE_REVISION_SOURCE_REQUIRED_HUMAN_REQUIRED")
+        source_version, source_path = max(validated, key=lambda item: item[0])
+        chapter = WriterChapter.model_validate(
+            json.loads(source_path.read_text(encoding="utf-8"))
+        )
+        review_path = self.repo.root / self._fast_root() / module.module_id / "science_review_v1.json"
+        if not review_path.is_file():
+            review_path = self._science_review(module, 1, chapter, dossier_path)
+
+        revision = source_version + 1
+        try:
+            draft_path, chapter = self._local_science_repair(
+                module, revision, chapter, review_path,
+                reopening_after_previous_skip=True,
+            )
+        except FastWholeModuleRewriteRequested:
+            draft_path, chapter = _writer_chapter(
+                self, module, revision, dossier_path, approved,
+                previous=source_path, review_path=review_path,
+            )
+        passed, recheck_path = self._recheck_science_revision(
+            module, chapter, review_path, dossier_path, revision,
+        )
+
+        while not passed:
+            next_revision = revision + 1
+            repair_decision = self._consult_local_science_repair(
+                module, next_revision, recheck_path,
+            )
+            if repair_decision.decision == "KEEP_PAUSED":
+                raise LiteratureWritingPaused("FAST_SCIENCE_REVIEW_HUMAN_REQUIRED")
+            if repair_decision.decision == "ACCEPT_WITH_DISCLOSED_LIMITATION":
+                break
+            revision = next_revision
+            if repair_decision.decision == "RETRY_WRITER_LOCAL_REPAIR":
+                try:
+                    draft_path, chapter = self._local_science_repair(
+                        module, revision, chapter, recheck_path,
+                        reopening_after_previous_skip=True,
+                    )
+                except FastWholeModuleRewriteRequested:
+                    draft_path, chapter = _writer_chapter(
+                        self, module, revision, dossier_path, approved,
+                        previous=self.repo.root / base / "writing_v071" /
+                        f"writer_v{revision - 1}_validated.json",
+                        review_path=recheck_path,
+                    )
+            elif repair_decision.decision == "REWRITE_WHOLE_MODULE":
+                draft_path, chapter = _writer_chapter(
+                    self, module, revision, dossier_path, approved,
+                    previous=self.repo.root / base / "writing_v071" /
+                    f"writer_v{revision - 1}_validated.json",
+                    review_path=recheck_path,
+                )
+            else:
+                raise ValueError("unknown reopened science repair decision")
+            passed, recheck_path = self._recheck_science_revision(
+                module, chapter, review_path, dossier_path, revision,
+            )
+
+        if passed:
+            limitation_path = None
+        else:
+            limitation = base / f"fast_science_limitation_revision_{outcome_revision}.json"
+            checks = [
+                {"status": "MATERIAL_PROBLEM", "problem": problem}
+                for problem in self._local_science_objections(recheck_path)
+            ]
+            _freeze(self, limitation, {
+                "checks": checks,
+                "source_recheck_path": str(recheck_path.relative_to(self.repo.root)),
+                "policy": "SCIENCE_OBJECTIONS_RETAINED_AFTER_REOPENED_REVISION",
+            })
+            limitation_path = limitation
+
+        glossary_path = _freeze_glossary(
+            self, module, chapter, revision=outcome_revision,
+        )
+        payload = {
+            "module_id": module.module_id,
+            "title": module.title,
+            "status": "ADOPTED",
+            "module_outcome_revision": outcome_revision,
+            "supersedes_outcome_path": str(prior_outcome_path),
+            "draft_path": str(draft_path.relative_to(self.repo.root)),
+            "short_summary": chapter.draft.short_summary,
+            "cited_packet_ids": chapter.draft.cited_packet_ids,
+            "unresolved_ids": chapter.draft.unresolved_ids,
+            "dissents_path": None,
+            "writing_policy": "fast",
+            "local_science_check_status": "MATERIAL_PROBLEM" if limitation_path else "PASS",
+            "local_science_check_path": (
+                str(limitation_path) if limitation_path else str(recheck_path.relative_to(self.repo.root))
+            ),
+            "glossary_path": str(glossary_path.relative_to(self.repo.root)),
+        }
+        _freeze(self, destination, payload)
+        self.repo.events.append(
+            "LITERATURE_MODULE_SCIENCE_REVISION_FROZEN",
+            {"meeting_id": self.repo.meeting_id, **payload}, actor="orchestrator",
+        )
+        return payload
+
     def _write_module(self, outline: FrozenResearchOutline, module: OutlineModule,
                       index: int, dossier_path: Path) -> dict:
         base = Path("public/literature_report/modules") / module.module_id
         outcome = base / "module_outcome.json"
-        if (self.repo.root / outcome).is_file():
-            self.engine.progress.info(f"{module.module_id} · 已恢复冻结模块")
-            return self._read_json(outcome)
+        revisioned_outcomes = []
+        for path in (self.repo.root / base).glob("module_outcome_revision_*.json"):
+            match = re.fullmatch(r"module_outcome_revision_(\d+)\.json", path.name)
+            if match:
+                revisioned_outcomes.append((int(match.group(1)), path))
+        if revisioned_outcomes:
+            latest_revision, latest_path = max(revisioned_outcomes, key=lambda item: item[0])
+            frozen = json.loads(latest_path.read_text(encoding="utf-8"))
+            prior_outcome_path = latest_path.relative_to(self.repo.root)
+            next_outcome_revision = latest_revision + 1
+        elif (self.repo.root / outcome).is_file():
+            frozen = self._read_json(outcome)
+            prior_outcome_path = outcome
+            next_outcome_revision = 2
+        else:
+            frozen = None
+            prior_outcome_path = outcome
+            next_outcome_revision = 2
+        if frozen is not None:
+            if frozen.get("local_science_check_status") != "MATERIAL_PROBLEM":
+                self.engine.progress.info(f"{module.module_id} · 已恢复冻结模块")
+                return frozen
+            self.engine.progress.info(
+                f"{module.module_id} · 该模块带未解决科学异议冻结；提供恢复修订入口"
+            )
+            return self._reopen_frozen_limited_module(
+                outline, module, index, dossier_path, frozen,
+                prior_outcome_path, next_outcome_revision,
+            )
         self._v071_progress = (index, len(outline.modules))
         approved = self._effective_fast_outline(module.module_id)
         draft_path, chapter = _writer_chapter(self, module, 1, dossier_path, approved)
@@ -2567,6 +3389,8 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
         material = any(item["checklist"]["issues"] or item["checklist"]["glossary_corrections"]
                        for item in review["reviews"])
         if material:
+            skipped_local_patch = False
+            skip_rationale = ""
             validated_v2 = self.repo.root / base / "writing_v071/writer_v2_validated.json"
             local_v2 = self.repo.root / base / "writing_v071/writer_v2_local_patch_applied.json"
             resuming_legacy_rewrite = validated_v2.is_file() and not local_v2.is_file()
@@ -2580,7 +3404,7 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                 )
             else:
                 self.engine.progress.info(
-                    f"{module.module_id} · 科学修订默认采用局部补丁；仅改异议涉及的段落或术语"
+                    f"{module.module_id} · 按科学异议逐项修订；有效修改独立保留，技术坏项排障后单项跳过"
                 )
                 try:
                     draft_path, chapter = self._local_science_repair(
@@ -2592,12 +3416,25 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                         previous=self.repo.root / base / "writing_v071/writer_v1_validated.json",
                         review_path=review_path,
                     )
-            passed, recheck_path = self._recheck_science_revision(
-                module, chapter, review_path, dossier_path, 2,
-            )
+                except FastLocalRepairSkipped as exc:
+                    skipped_local_patch = True
+                    skip_rationale = exc.rationale
+                    self.engine.progress.info(
+                        f"{module.module_id} · 按 Human 决定跳过失败补丁；保留现稿并披露未解决异议"
+                    )
+            if skipped_local_patch:
+                # Keep the last validated chapter exactly as-is. The original
+                # science review remains adverse and is recorded below; skipping
+                # a patch is never interpreted as passing scientific review.
+                passed = False
+                recheck_path = review_path
+            else:
+                passed, recheck_path = self._recheck_science_revision(
+                    module, chapter, review_path, dossier_path, 2,
+                )
 
             revision = 2
-            accepted_after_legacy_ruling = False
+            accepted_after_legacy_ruling = skipped_local_patch
             if not passed and resuming_legacy_rewrite:
                 # Honor any already-open Human decision from the former flow
                 # before creating a successor consultation with new options.
@@ -2643,6 +3480,14 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                             f"writer_v{revision - 1}_validated.json",
                             review_path=recheck_path,
                         )
+                    except FastLocalRepairSkipped as exc:
+                        skipped_local_patch = True
+                        skip_rationale = exc.rationale
+                        accepted_after_legacy_ruling = True
+                        self.engine.progress.info(
+                            f"{module.module_id} · 按 Human 决定跳过失败补丁；保留最近通过校验的稿件"
+                        )
+                        break
                 elif decision.decision == "REWRITE_WHOLE_MODULE":
                     draft_path, chapter = _writer_chapter(
                         self, module, revision, dossier_path, approved,
@@ -2656,10 +3501,23 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
                 )
             if not passed:
                 note_path = base / "fast_science_limitation.json"
-                _freeze(self, note_path, {"checks": [
+                recorded_problems = self._local_science_objections(recheck_path)
+                checks = [
                     {"status": "MATERIAL_PROBLEM", "problem": problem}
-                    for vote in self._read_json(recheck_path.relative_to(self.repo.root)).get("votes", [])
-                    for problem in vote.get("remaining_material_problems", [])]})
+                    for problem in recorded_problems
+                ]
+                if skipped_local_patch:
+                    checks.append({
+                        "status": "MATERIAL_PROBLEM",
+                        "problem": (
+                            "Human 选择跳过未能应用的局部补丁；保留最近一版已冻结稿件。"
+                            "本模块科学异议仍未解决，跳过不代表科学复核通过。"
+                            + (" Human 说明：" + skip_rationale if skip_rationale else "")
+                        ),
+                    })
+                _freeze(self, note_path, {"checks": [
+                    *checks,
+                ]})
             else:
                 note_path = None
         else:
@@ -2681,7 +3539,9 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
     def _synthesis(self, taskbook: FastTaskbook, completed: list[dict]) -> Path:
         relative = self._fast_root() / "whole_report_synthesis.json"
         summaries = [{"module_id": item["module_id"], "title": item["title"],
-                      "summary": item["short_summary"]} for item in completed]
+                      "summary": item["short_summary"],
+                      "local_science_check_status": item.get("local_science_check_status", "PASS")}
+                     for item in completed]
         glossary_path = (self.repo.root / completed[-1]["glossary_path"]
                          if completed and completed[-1].get("glossary_path") else None)
         glossary_terms = ([item.get("term", "") for item in json.loads(
@@ -2716,7 +3576,10 @@ class FastLiteratureRunner(LiteratureReportExecutionRunner):
             writer_bounded_evidence.append(_writer_visible_payload(evidence, local_catalog))
         synthesis = _frozen_or_call(
             self, relative, FastWholeSynthesis, "WRITER", "fast_whole_report_synthesis",
-            "为已经完成科学复核的章节撰写全文标题、摘要、引言、方法说明与必要的跨模块综合。"
+            "为各章节撰写全文标题、摘要、引言、方法说明与必要的跨模块综合。"
+            "frozen_module_summaries 会标明章节的 local_science_check_status；"
+            "对 MATERIAL_PROBLEM 章节，只能如实概括，不能把其未解决异议表述成已核实结论，"
+            "也不能据该章内容建立新的跨模块结论。"
             "不重写已经审阅过的模块正文，不添加未经核查的科学事实。跨模块综合若没有证据支撑则留空。"
             "摘要与引言只概括已有模块；结论可留空。body_sections 必须为空数组，"
             "不要在跨模块综合中引入术语表未解释的关键专门方法名；确需使用时就地简短定义，"

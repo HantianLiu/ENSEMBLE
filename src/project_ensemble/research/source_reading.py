@@ -21,6 +21,11 @@ from project_ensemble.research.documents import (
 )
 from project_ensemble.research.pdf_warnings import capture_recoverable_pdf_warnings
 from project_ensemble.research.retrievers import TavilyRetriever, coerce_retrieval_result
+from project_ensemble.research.search_policy import general_search_allowed, general_search_engine
+from project_ensemble.research.institutional_access import (
+    PRIVATE_ROOT, fetch_institutional_original, institutional_access_allowed,
+    original_locations, scholarly_candidate, publisher_body_text,
+)
 from project_ensemble.storage.meeting import MeetingRepository
 
 
@@ -92,11 +97,19 @@ class SourceReader:
                     yield from leaf_backends(child)
 
         backends = tuple(leaf_backends(retriever))
+        if not general_search_allowed(repo):
+            backends = tuple(item for item in backends if not set(getattr(item, "backend_ids", ())) & {"tavily", "parallel"})
+        selected_engine = general_search_engine(repo)
         self.tavily = next(
-            (item for item in backends if isinstance(item, TavilyRetriever)), None
+            (item for item in backends if isinstance(item, TavilyRetriever)
+             and selected_engine == "tavily"), None
         )
-        self.search_backend = self.tavily or next(
+        self.academic_backend = next(
             (item for item in backends if "openalex" in getattr(item, "backend_ids", ())), None
+        )
+        self.search_backend = next(
+            (item for item in backends if selected_engine in getattr(item, "backend_ids", ())),
+            self.academic_backend,
         )
 
     def prepare(
@@ -104,7 +117,8 @@ class SourceReader:
     ) -> tuple[list[dict], list[dict]]:
         """Read originals and seek bounded alternatives when an original is unavailable."""
         terms = _terms(question)
-        eligible = [item for item in candidates if self._readable_location(item)]
+        allow_institutional = institutional_access_allowed(self.repo)
+        eligible = [item for item in candidates if self._readable_location(item, institutional=allow_institutional)]
         eligible.sort(key=lambda item: (
             -self._candidate_score(item, terms), str(item["source_id"])
         ))
@@ -115,10 +129,12 @@ class SourceReader:
             item = dict(candidate)
             source_id = str(item["source_id"])
             if source_id in selected:
-                record = self._read(item, terms, request_key=request_key)
+                record = self._read(item, terms, request_key=request_key, institutional=allow_institutional)
                 item["source_read"] = {
                     key: record[key]
-                    for key in ("status", "method", "excerpts", "record_path")
+                    for key in ("status", "method", "excerpts", "record_path", "access_basis",
+                                "private_original_path", "content_sha256", "media_type", "resolved_url")
+                    if key in record
                 }
                 ledger.append({
                     "source_id": source_id,
@@ -133,7 +149,7 @@ class SourceReader:
             if not item.get("local_archive_path") and (
                 (item.get("source_read") or {}).get("status")
                 in {"ACCESS_BLOCKED", "UNREADABLE"}
-                or not self._readable_location(item)
+                or not self._readable_location(item, institutional=allow_institutional)
             )
         ]
         unavailable.sort(key=lambda item: (
@@ -155,10 +171,12 @@ class SourceReader:
                 prepared = known.get(source_id) or dict(alternative)
                 prepared.setdefault("alternate_for_source_id", item["source_id"])
                 prepared.setdefault("source_identity_status", "UNVERIFIED_ALTERNATIVE")
-                record = self._read(prepared, terms, request_key=request_key)
+                record = self._read(prepared, terms, request_key=request_key, institutional=allow_institutional)
                 prepared["source_read"] = {
                     key: record[key]
-                    for key in ("status", "method", "excerpts", "record_path")
+                    for key in ("status", "method", "excerpts", "record_path", "access_basis",
+                                "private_original_path", "content_sha256", "media_type", "resolved_url")
+                    if key in record
                 }
                 ledger.append({
                     "source_id": source_id,
@@ -219,7 +237,13 @@ class SourceReader:
     def _alternative_search(
         self, unavailable: dict, *, question: str, request_key: str
     ) -> tuple[list[dict], dict | None]:
-        if self.search_backend is None:
+        # Recover scholarly originals through scholarly metadata, not through
+        # automatically billed web discovery merely because a publisher blocks access.
+        scholarly = (unavailable.get("retrieval_backend_id") == "openalex"
+                     or str(unavailable.get("source_id", "")).startswith("https://openalex.org/")
+                     or bool(unavailable.get("doi")))
+        search_backend = self.academic_backend if scholarly else self.search_backend
+        if search_backend is None:
             return [], None
         queries = self._recovery_queries(unavailable, question)
         if not queries:
@@ -242,7 +266,7 @@ class SourceReader:
             "unavailable_source_id": unavailable["source_id"],
             "unavailable_status": (unavailable.get("source_read") or {}).get("status", "NO_READABLE_LOCATION"),
             "queries": queries,
-            "backend_ids": list(self.search_backend.backend_ids),
+            "backend_ids": list(search_backend.backend_ids),
             "status": "NO_MATCH",
             "accepted_candidates": [],
             "rejected_source_ids": [],
@@ -254,8 +278,8 @@ class SourceReader:
         for query in queries:
             try:
                 result = coerce_retrieval_result(
-                    self.search_backend.retrieve_exploratory(query),
-                    default_backend_ids=self.search_backend.backend_ids,
+                    search_backend.retrieve_exploratory(query),
+                    default_backend_ids=search_backend.backend_ids,
                 )
             except Exception as exc:
                 record["search_errors"].append(f"{type(exc).__name__}: {str(exc)[:300]}")
@@ -291,13 +315,12 @@ class SourceReader:
             "record_path": str(relative),
         }
 
-    @staticmethod
-    def _readable_location(candidate: dict) -> bool:
+    def _readable_location(self, candidate: dict, *, institutional: bool | None = None) -> bool:
         if candidate.get("local_archive_path"):
             return True
-        url = candidate.get("full_text_url")
-        parsed = urlparse(str(url or ""))
-        return bool(candidate.get("full_text_is_public") and parsed.scheme in {"http", "https"} and parsed.hostname)
+        if institutional is None:
+            institutional = institutional_access_allowed(self.repo)
+        return bool(original_locations(candidate, institutional=institutional))
 
     @staticmethod
     def _candidate_score(candidate: dict, terms: set[str]) -> float:
@@ -309,10 +332,18 @@ class SourceReader:
             provider_score = 0
         return 4 * _score(title, terms) + _score(abstract, terms) + 4 * provider_score
 
-    def _read(self, candidate: dict, terms: set[str], *, request_key: str) -> dict:
+    def _read(self, candidate: dict, terms: set[str], *, request_key: str, institutional: bool | None = None) -> dict:
         source_id = str(candidate["source_id"])
+        if institutional is None:
+            institutional = institutional_access_allowed(self.repo)
+        use_institutional = bool(institutional and scholarly_candidate(candidate)
+                                 and not candidate.get("local_archive_path"))
+        cache_version = "source-read-v2"
+        if use_institutional:
+            cache_version += "\0institutional-v1\0" + json.dumps(
+                original_locations(candidate, institutional=True), sort_keys=True)
         digest = hashlib.sha256(
-            f"{request_key}\0{source_id}\0source-read-v2".encode("utf-8")
+            f"{request_key}\0{source_id}\0{cache_version}".encode("utf-8")
         ).hexdigest()
         relative = Path("audit_private/research/source_reads") / f"{digest}.json"
         path = self.repo.root / relative
@@ -345,9 +376,32 @@ class SourceReader:
                     raise ValueError("human original digest mismatch")
                 media_type = "application/pdf" if target.suffix.lower() == ".pdf" else "text/plain"
                 method = "HUMAN_ORIGINAL"
+            elif use_institutional:
+                original = fetch_institutional_original(self.repo, self.fetcher, candidate)
+                record["institutional_attempt_record"] = original["record_path"]
+                record["access_basis"] = original["access_basis"]
+                if original["status"] != "FETCHED":
+                    record["status"] = original["status"]
+                    record["error"] = "未取得可读原文；访问失败或页面仅含元数据。机构尝试已缓存，不重复请求。"
+                    self.repo.docs.write_once(relative, json.dumps(record, ensure_ascii=False, indent=2))
+                    return record
+                target = (self.repo.root / original["archived_path"]).resolve()
+                if not target.is_relative_to((self.repo.root / PRIVATE_ROOT / "originals").resolve()):
+                    raise ValueError("invalid institutional original path")
+                content = target.read_bytes()
+                if hashlib.sha256(content).hexdigest() != original["archived_sha256"]:
+                    raise ValueError("institutional original hash mismatch")
+                record["private_original_path"] = original["archived_path"]
+                record["resolved_url"] = original["resolved_url"]
+                media_type = original["media_type"]
+                method = "INSTITUTIONAL_ORIGINAL" if original["access_basis"] == "INSTITUTIONAL_SUBSCRIPTION" else "DIRECT_ORIGINAL"
             else:
                 url = str(candidate["full_text_url"])
                 if (candidate.get("source_type") == "web_page" and self.tavily is not None
+                        and self.tavily.extract_enabled
+                        and candidate.get("retrieval_backend_id") != "openalex"
+                        and not str(candidate.get("source_id", "")).startswith("https://openalex.org/")
+                        and not candidate.get("doi")
                         and not urlparse(url).path.lower().endswith(".pdf")):
                     try:
                         extracted = self.tavily.extract_url(url)
@@ -430,9 +484,12 @@ class SourceReader:
             else:
                 text = content.decode("utf-8-sig", errors="replace")
                 if media_type in {"text/html", "application/xhtml+xml"}:
-                    parser = _VisibleText()
-                    parser.feed(text)
-                    text = "".join(parser.parts)
+                    if use_institutional:
+                        text = publisher_body_text(text)
+                    else:
+                        parser = _VisibleText()
+                        parser.feed(text)
+                        text = "".join(parser.parts)
                 excerpt = _excerpt(text[:250000], terms)
                 if excerpt:
                     record["excerpts"] = [{"locator": "正文摘录；网页未提供页码", "text": excerpt}]

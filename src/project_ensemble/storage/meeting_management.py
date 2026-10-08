@@ -28,6 +28,8 @@ from project_ensemble.storage.meeting_index import (
     inspect_meeting, meeting_is_complete, unregister_meeting,
 )
 from project_ensemble.user_settings import settings_dir
+from project_ensemble.storage.literature_zip_cache import preserve_zip_members
+from project_ensemble.runtime.usage_summary import SUMMARY_PATH, build_usage_summary
 
 
 @dataclass(frozen=True)
@@ -151,10 +153,10 @@ def _retained_source_files(
         Path("public/task.json"),
         Path("identity_private/meeting_manifest.json"),
         Path("human_private/session_configuration.json"),
+        SUMMARY_PATH,
         Path("original_prompt.txt"),
         Path("parent_prompt.txt"),
         Path("meeting_lineage.json"),
-        Path("public/research/literature_bundle.zip"),
         Path("public/research/research_only_result.json"),
     }
     if not inline_source:
@@ -194,6 +196,10 @@ def _retained_source_files(
         elif candidate.is_file():
             exact.add(candidate.relative_to(root))
     retained_dirs = (
+        # Tiny append-only controls retain the latest search permission for
+        # post-meeting Q&A instead of reverting to the initialization manifest.
+        Path("human_private/runtime_controls"),
+        Path("human_private/institutional_documents"),
         Path("public/research/evidence_packets"),
         Path("public/research/cache_invalidations"),
         Path("public/research/literature_bundle"),
@@ -298,10 +304,22 @@ def compact_meeting(root: str | Path) -> dict:
         swapped = False
         try:
             hashes = {}
+            # ZIPs are exports, not the sole source of retained literature.
+            # Normalize any legacy ZIP-only files before removing the cache.
             for relative in plan.retained_files:
                 if relative == plan.document_target and plan.document_source != plan.document_target:
                     continue
                 hashes[str(relative)] = _link_inside_root(root, relative, stage, relative)
+            for member in preserve_zip_members(root, stage):
+                hashes[member["path"]] = member["sha256"]
+            # Keep a small private usage snapshot before raw workflow logs are
+            # removed. An existing summary is copied verbatim (never overwritten).
+            if SUMMARY_PATH not in plan.retained_files:
+                summary = json.dumps(build_usage_summary(root), ensure_ascii=False, indent=2)
+                summary_file = stage / SUMMARY_PATH
+                summary_file.parent.mkdir(parents=True, exist_ok=True)
+                summary_file.write_text(summary, encoding="utf-8")
+                hashes[str(SUMMARY_PATH)] = hashlib.sha256(summary.encode("utf-8")).hexdigest()
             if Path("original_prompt.txt") not in plan.retained_files:
                 task = json.loads((root / "public/task.json").read_text(encoding="utf-8"))
                 prompt = str(task["description"]).strip() + "\n"
@@ -379,6 +397,8 @@ def compact_meeting(root: str | Path) -> dict:
                 "retained_document_path": str(plan.document_target),
                 "retained_html_aliases": {name: str(target) for name, target in plan.html_aliases},
                 "retained_file_sha256": hashes,
+                "literature_zip_policy": "ON_DEMAND_EXPORT_ONLY",
+                "private_usage_summary_path": str(SUMMARY_PATH),
                 "removed_file_count": plan.removed_file_count,
                 "removed_bytes": plan.removed_bytes,
                 "notice": "Workflow and audit records were removed; this meeting cannot resume its original procedure.",
@@ -399,8 +419,9 @@ def compact_meeting(root: str | Path) -> dict:
                 "如原会议未完成，它不代表获得了原程序认证。\n\n"
                 f"保留文稿：`{plan.document_target}`。\n\n"
                 f"{html_notice}"
-                "证据包：`public/research/evidence_packets/`；可下载文献包："
-                "`public/research/literature_bundle.zip`（如原会已生成）。\n\n"
+                "证据包：`public/research/evidence_packets/`；文献原文件："
+                "`public/research/literature_bundle/`。ZIP 不长期保存；"
+                "可运行 `ensemble gather` 按需打包导出。\n\n"
                 "原会议流程和审计原始记录已删除，不能继续原会议。"
                 "详情及文件哈希见 `public/archive_manifest.json`。\n",
                 encoding="utf-8",

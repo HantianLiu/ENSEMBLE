@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -332,6 +333,7 @@ class EvidenceSource(BaseModel):
     is_primary_source: bool | None = None
     evidence_use_class: EvidenceUseClass
     original_document_url: str | None = None
+    access_basis: Literal["OPEN_ACCESS", "INSTITUTIONAL_SUBSCRIPTION", "HUMAN_SUPPLIED"] | None = None
     license: str | None = None
     archive_status: DocumentArchiveStatus = DocumentArchiveStatus.NOT_AVAILABLE
     archived_path: str | None = None
@@ -432,6 +434,7 @@ class EvidencePacket(BaseModel):
     # Older packets remain frozen, but only packets from the general source-
     # recovery path may satisfy new cache requests.
     source_recovery_performed: bool = False
+    institutional_access_allowed: bool = False
     sources: list[EvidenceSource] = Field(default_factory=list)
     supporting_evidence: list[EvidenceFinding] = Field(default_factory=list)
     contradictory_evidence: list[EvidenceFinding] = Field(default_factory=list)

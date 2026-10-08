@@ -2,8 +2,23 @@ recursive-include docs/governance *.md *.json
 recursive-include docs/governance_legacy_2026_09_23 *.md *.json
 recursive-include examples *.toml
 recursive-include src/project_ensemble/assets/fonts *.ttf LICENSE.txt
+recursive-include src/project_ensemble/assets/skills SKILL.md
 include LICENSE
 include README.md
 include README_v071.md
 include README_v071.en.md
 include THIRD_PARTY_NOTICES.md
+include VERSION.md
+include AGENTS.md
+include CONTRIBUTING.md
+include TODO.md
+include PROJECT_OVERVIEW_CN.txt
+include api.md
+include RELEASE_NOTES_0.7.5.md
+include .gitignore
+recursive-include docs *.md *.json
+recursive-include scripts *.sh *.py ensemble ensemble-v071
+recursive-include tests *.py
+recursive-include generated_schemas *.json
+recursive-include .github *.md *.yml *.yaml
+exclude publish_github.local.sh

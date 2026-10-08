@@ -1,4 +1,5 @@
 import threading
+import json
 
 import httpx
 import pytest
@@ -66,6 +67,62 @@ def _claim(source_domain="ACADEMIC"):
         freshness_class="STABLE",
         freshness_rationale="Fixture freshness.",
     )
+
+
+@pytest.mark.parametrize("mode,request_count", [("claim", 4), ("exploratory", 1)])
+def test_tavily_default_requests_explicit_basic_without_auto_upgrade(monkeypatch, mode, request_count):
+    requests = []
+
+    def handler(request):
+        assert str(request.url).endswith("/search")
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "results": [], "request_id": "fixture-search",
+            "usage": {"credits": 1},
+        })
+
+    transport = httpx.MockTransport(handler)
+    client_class = httpx.Client
+    monkeypatch.setattr(
+        "project_ensemble.research.retrievers.httpx.Client",
+        lambda **kwargs: client_class(transport=transport),
+    )
+    retriever = TavilyRetriever(api_key="fixture-key")
+    result = (retriever.retrieve(_claim()) if mode == "claim"
+              else retriever.retrieve_exploratory("fixture question"))
+    assert len(requests) == request_count
+    for payload in requests:
+        assert payload["search_depth"] == "basic"
+        assert payload["auto_parameters"] is False
+        assert payload["include_answer"] is False
+        assert payload["include_raw_content"] is False
+        assert payload["include_usage"] is True
+    assert all(item["search_depth"] == "basic" for item in result.query_trace)
+    assert all(item["auto_parameters"] is False for item in result.query_trace)
+    assert sum(item["provider_usage"]["credits"] for item in result.query_trace) == request_count
+
+
+def test_tavily_advanced_search_requires_explicit_configuration(monkeypatch):
+    from project_ensemble.config import TavilyResearchConfig
+
+    cfg = TavilyResearchConfig(search_depth="advanced")
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": [], "usage": {"credits": 2}})
+
+    transport = httpx.MockTransport(handler)
+    client_class = httpx.Client
+    monkeypatch.setattr(
+        "project_ensemble.research.retrievers.httpx.Client",
+        lambda **kwargs: client_class(transport=transport),
+    )
+    result = TavilyRetriever(api_key="fixture-key", search_depth=cfg.search_depth).retrieve_exploratory("fixture")
+    assert requests[0]["search_depth"] == "advanced"
+    assert requests[0]["auto_parameters"] is False
+    assert result.query_trace[0]["search_depth"] == "advanced"
+    assert result.query_trace[0]["provider_usage"]["credits"] == 2
 
 
 def test_tavily_executes_all_adversarial_queries_and_keeps_provenance(monkeypatch):
@@ -384,7 +441,8 @@ def test_policy_retriever_handles_openalex_429_without_quota_headers(policy, exp
     assert tavily.calls == expected_tavily_calls
 
 
-def test_policy_retriever_uses_tavily_after_openalex_connection_retries(monkeypatch):
+@pytest.mark.parametrize("authorized", [False, True])
+def test_policy_retriever_requires_authorization_after_openalex_connection_retries(monkeypatch, authorized):
     from project_ensemble.errors import OpenAlexConnectionUnavailable
     from project_ensemble.research.retrievers import PolicyResearchRetriever
 
@@ -404,10 +462,16 @@ def test_policy_retriever_uses_tavily_after_openalex_connection_retries(monkeypa
 
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     openalex, tavily = UnreachableOpenAlex(), AvailableTavily()
-    result = PolicyResearchRetriever(openalex, tavily).retrieve(_claim())
+    retriever = PolicyResearchRetriever(openalex, tavily, quota_policy="tavily" if authorized else "wait")
+    if authorized:
+        result = retriever.retrieve(_claim())
+        assert tavily.calls == 1
+        assert result.failed_backend_ids == ("openalex",)
+    else:
+        with pytest.raises(OpenAlexConnectionUnavailable):
+            retriever.retrieve(_claim())
+        assert tavily.calls == 0
     assert openalex.calls == 2
-    assert tavily.calls == 1
-    assert result.failed_backend_ids == ("openalex",)
 
 
 def test_policy_retriever_routes_nonacademic_claims_to_web_search():

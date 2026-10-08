@@ -374,6 +374,10 @@ class OpenAlexRetriever:
             "is_retracted": bool(item.get("is_retracted", False)),
             "full_text_url": full_text_url,
             "full_text_is_public": bool(open_access.get("is_oa") and full_text_url),
+            "retrieval_backend_id": "openalex",
+            "institutional_full_text_urls": list(dict.fromkeys(
+                str(url) for url in (primary.get("pdf_url"), primary.get("landing_page_url"), item.get("doi")) if url
+            )),
             "license": best_open_access.get("license") or primary.get("license"),
         }
 

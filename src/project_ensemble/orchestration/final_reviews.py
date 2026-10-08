@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from project_ensemble.domain import MeetingPhase
 from project_ensemble.governance_private.thresholds import high_threshold, high_threshold_formula
 from project_ensemble.orchestration.engine import MeetingEngine
+from project_ensemble.orchestration.math_integrity import formula_bookkeeping_rules_for
 from project_ensemble.orchestration.final_publication import FinalPublicationRunner
 from project_ensemble.orchestration.post_meeting_accountability import (
     PostMeetingAccountabilityRunner,
@@ -1242,7 +1243,7 @@ class FinalReviewRunner:
             self.governance_docs / "07_runtime_memory/other_participants/think_tank_librarian.md",
             self.governance_docs / "10_open_questions/open_questions.md",
         )
-        return "\n\n".join(path.read_text(encoding="utf-8") for path in paths)
+        return "\n\n".join(path.read_text(encoding="utf-8") for path in paths) + formula_bookkeeping_rules_for(self.repo)
 
     def _execution_review_system_text(self) -> str:
         paths = (

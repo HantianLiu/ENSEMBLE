@@ -26,7 +26,7 @@ class ModelReplacementRecord(BaseModel):
     from_model_id: str
     to_provider_id: str
     to_model_id: str
-    reason: str = Field(min_length=1, max_length=2000)
+    reason: str | None = Field(default=None, min_length=1, max_length=2000)
     created_at: str
     record_path: str
 
@@ -182,18 +182,16 @@ class ModelReplacementService:
         participant_id: str,
         provider_id: str,
         model_id: str,
-        reason: str,
+        reason: str | None = None,
     ) -> ModelReplacementRecord:
         participant_id = participant_id.strip()
         provider_id = provider_id.strip()
         model_id = model_id.strip()
-        reason = reason.strip()
+        reason = (reason.strip() or None) if reason is not None else None
         if not participant_id:
             raise ValueError("participant ID cannot be empty")
         if not provider_id or not model_id:
             raise ValueError("replacement runtime must include provider and model")
-        if not reason:
-            raise ValueError("a reason is required for an audited model replacement")
         from_provider_id, from_model_id = current_runtime_for(self.repo, participant_id)
         if (from_provider_id, from_model_id) == (provider_id, model_id):
             raise ValueError("replacement runtime is identical to the participant's current runtime")
@@ -263,7 +261,7 @@ class ModelReplacementService:
         from_model_id: str,
         provider_id: str,
         model_id: str,
-        reason: str,
+        reason: str | None = None,
     ) -> list[ModelReplacementRecord]:
         source = (from_provider_id.strip(), from_model_id.strip())
         targets = [

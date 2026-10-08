@@ -1,6 +1,6 @@
 # API 与配置入口（v0.7.0 历史说明）
 
-> 本文件保留旧版命令和接口示例。当前 v0.7.3 的安装与使用说明见
+> 本文件保留旧版命令和接口示例。当前 v0.7.5 的安装与使用说明见
 > [`docs/INSTALL.md`](docs/INSTALL.md)；旧版示例不可直接当作当前命令使用。
 
 Project_ENSEMBLE v0.7.0 使用配置文件和 provider 的 live model discovery，不把模型名称硬编码为

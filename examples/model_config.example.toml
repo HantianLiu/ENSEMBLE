@@ -16,6 +16,23 @@ reasoning_effort_map = { low = "low", medium = "high", high = "high" }
 # model_input_token_limits = { "deepseek-chat" = 1048576 }
 # model_max_concurrent_requests = { "deepseek-chat" = 1 }
 
+# SiliconFlow exposes reasoning_effort only for the exact model IDs below.
+# The normalized ENSEMBLE "high" setting maps to SiliconFlow's xhigh alias
+# (provider max tier). All other SiliconFlow models keep provider defaults.
+[providers.siliconflow]
+kind = "openai_compatible"
+enabled = false
+base_url = "https://api.siliconflow.cn/v1"
+api_key_env = "SILICONFLOW_API_KEY"
+timeout_seconds = 1200.0
+reasoning_effort_transport = "openai"
+reasoning_effort_map = { high = "xhigh" }
+reasoning_effort_model_patterns = [
+  "Pro/deepseek-ai/DeepSeek-V4",
+  "deepseek-ai/DeepSeek-V4-Flash",
+  "Pro/zai-org/GLM-5.2",
+]
+
 [providers.kimi]
 kind = "openai_compatible"
 enabled = false

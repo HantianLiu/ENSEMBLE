@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from project_ensemble.storage.meeting import MeetingRepository
+from project_ensemble.runtime.prompt_contract import parse_json_prompt
 
 
 EVIDENCE_LIST_KEYS = frozenset({
@@ -72,16 +73,14 @@ def compact_evidence_request(
     rank: Callable[[list[dict]], list[int]],
 ) -> tuple[str, dict] | None:
     """Keep every non-evidence field and every externally cited evidence item."""
-    try:
-        source = json.loads(user_text)
-    except ValueError:
+    parsed = parse_json_prompt(user_text)
+    if parsed is None:
         return None
-    if not isinstance(source, dict):
-        return None
+    source, suffix = parsed
     candidates, groups = _inventory(source)
     if not candidates or len(candidates) > 600:
         return None
-    compact = json.dumps(source, ensure_ascii=False, separators=(",", ":"))
+    compact = json.dumps(source, ensure_ascii=False, separators=(",", ":")) + suffix
     if fits(compact):
         return compact, {"method": "LOSSLESS_JSON_MINIFICATION", "omitted": []}
 
@@ -122,7 +121,7 @@ def compact_evidence_request(
             "original_request_sha256": hashlib.sha256(user_text.encode()).hexdigest(),
             "instruction": "This is a partial evidence view; do not claim exhaustive coverage.",
         }
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":")) + suffix
 
     for number in reversed(priority):
         if number in protected:

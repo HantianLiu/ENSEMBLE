@@ -44,6 +44,7 @@ from project_ensemble.research.retrievers import (
     openalex_unavailable_reason,
 )
 from project_ensemble.research.source_reading import SourceReader
+from project_ensemble.research.institutional_access import institutional_access_allowed
 from project_ensemble.providers.retry import call_with_retries
 from project_ensemble.storage.meeting import MeetingRepository
 
@@ -393,6 +394,7 @@ class ResearchDesk:
                 "full_text_access_assessment": full_text_access_assessment,
                 "source_reading_performed": True,
                 "source_recovery_performed": True,
+                "institutional_access_allowed": institutional_access_allowed(self.repo),
                 "knowledge_status": published_status,
                 "supersedes_packet_ids": (
                     [matching_packets[0][2].packet_id] if matching_packets else []
@@ -630,7 +632,7 @@ class ResearchDesk:
             "历史实验结果及其他变化缓慢的学术事实使用 STABLE。另将来源领域分类为 ACADEMIC、"
             "STANDARD_METHOD、SOFTWARE_API、CURRENT_FACT 或 GENERAL，并解释分类依据。"
             "原始论文、学术理论、数学定义与研究方法的核查应归为 ACADEMIC；即使原文以网页或 PDF 形式提供，"
-            "也不要仅因载体是网页就归入 GENERAL。ACADEMIC 优先使用 OpenAlex，Tavily 仅作有界例外，"
+            "也不要仅因载体是网页就归入 GENERAL。ACADEMIC 优先使用 OpenAlex，所选通用引擎仅用于明确授权的有界例外，"
             "不得为了获得更多候选而默认并用付费网页检索。"
             "不确定时选择适用类别中有效期较短的一类并说明原因。拒绝开放式的立场委托。只返回 JSON。"
         )
@@ -1400,6 +1402,11 @@ class ResearchDesk:
             # Existing packets remain immutable, but cannot satisfy a new
             # request without the now-required original-source reading pass.
             if not packet.source_reading_performed or not packet.source_recovery_performed:
+                continue
+            # A new access grant permits a new bounded pass on previously
+            # unresolved evidence, without rewriting the original packet.
+            if (institutional_access_allowed(self.repo) and not packet.institutional_access_allowed
+                    and packet.knowledge_status in {KnowledgeStatus.UNRESOLVED, KnowledgeStatus.QUALIFIED}):
                 continue
             if packet.cache_expires_at is not None and now <= packet.cache_expires_at:
                 return path, packet

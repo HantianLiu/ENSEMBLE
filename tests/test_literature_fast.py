@@ -16,7 +16,8 @@ from project_ensemble.errors import (
 from project_ensemble.orchestration.consultations import HumanConsultationIssue, HumanConsultationService
 from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.orchestration.literature_fast import (
-    FastBreadthSearchPlan, FastLiteratureRunner, FastLocalScienceRepair, FastModulePlan, FastPlanningTurn, FastQueryBatch,
+    FastBreadthSearchPlan, FastLiteratureRunner,
+    FastLocalRepairSkipped, FastLocalScienceRepair, FastModulePlan, FastPlanningTurn, FastQueryBatch,
     FastResearchDeskPause, FastResearchDeskRetry, FastSearchQueries, FastSplitProposal, FastTaskbook,
     FastWholeSynthesis, request_fast_research_rollback,
 )
@@ -293,7 +294,7 @@ def test_fast_menu_uses_writer_and_two_reviewers_without_chair(monkeypatch, tmp_
     ])
     selection = TerminalWizard(
             input_fn=lambda prompt: (
-                "" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次"))
+                "" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次", "通用网页搜索", "学术搜索引擎"))
                 else next(answers)
             ), output=io.StringIO()
     ).collect(config(tmp_path))
@@ -318,7 +319,7 @@ def test_fast_menu_can_skip_parallel_split_proposals(monkeypatch, tmp_path):
     ])
     selection = TerminalWizard(
         input_fn=lambda prompt: (
-            "" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次"))
+            "" if prompt.startswith(("选择 1–2；回车默认等待", "每个模型最多同时调用多少次", "通用网页搜索", "学术搜索引擎"))
             else next(answers)
         ), output=io.StringIO()
     ).collect(config(tmp_path))
@@ -1769,6 +1770,12 @@ def test_fast_science_review_hides_individual_submissions_until_group_freezes(tm
 
     runner = object.__new__(FastLiteratureRunner)
     runner.repo = SimpleNamespace(root=tmp_path, docs=Docs())
+    runner._v071_progress = (1, 1)
+    displayed_steps = []
+    runner.engine = SimpleNamespace(
+        progress=SimpleNamespace(literature_step=lambda **step: displayed_steps.append(step)),
+        status=SimpleNamespace(phase=None),
+    )
     runner.active = [
         {"representative_id": rid,
          "runtime": {"persona": Persona.LIBRARIAN.value, "provider_id": provider, "model_id": "m"}}
@@ -1787,8 +1794,11 @@ def test_fast_science_review_hides_individual_submissions_until_group_freezes(tm
     chapter = WriterChapter(draft=ModuleDraft(
         title="标题", body_markdown="科学正文", short_summary="小结",
     ))
-    module = SimpleNamespace(module_id="RM-01", model_dump=lambda **_: {"module_id": "RM-01"})
+    module = SimpleNamespace(module_id="RM-01", title="标题",
+                             model_dump=lambda **_: {"module_id": "RM-01"})
     group = runner._science_review(module, 1, chapter, dossier)
+    assert displayed_steps[0]["section_id"] == "RM-01"
+    assert displayed_steps[0]["stage"] == "science"
     assert calls == ["R-A"]
     assert len(json.loads(group.read_text())["reviews"]) == 1
     assert (tmp_path / "governance_private/literature_report/fast/RM-01/science_v1_R-A.json").is_file()
@@ -1821,6 +1831,323 @@ def test_final_fast_science_issue_is_superseded_with_local_repair_choice(tmp_pat
     assert successor[0].options[0] == "RETRY_WRITER_LOCAL_REPAIR"
     assert (tmp_path / "human_private/consultations" / f"{old_id}.issue.json").read_bytes() == original_bytes
     assert (tmp_path / "human_private/consultations" / f"{old_id}.superseded.json").is_file()
+
+
+def test_local_format_resume_retires_duplicate_technical_consultations(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    service = HumanConsultationService(runner.repo)
+    retried_id = "HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-C2"
+    service.open_issue(HumanConsultationIssue(
+        issue_id=retried_id, meeting_id="LR-TEST",
+        reason_code="FAST_LOCAL_PATCH_TECHNICAL_REPAIR_HUMAN_REQUIRED",
+        stage="FAST_LOCAL_PATCH_TECHNICAL_REPAIR", question="One bounded local retry",
+        options=["RETRY_WRITER_LOCAL_REPAIR", "REWRITE_WHOLE_MODULE", "PAUSE_FOR_MANUAL_REVIEW"],
+        context={"module_id": "RM-01", "last_problem": "missing C citation"},
+    ))
+    service.resolve(
+        issue_id=retried_id, decision="RETRY_WRITER_LOCAL_REPAIR",
+        rationale="Try one bounded repair", scope="One local retry",
+    )
+    for cycle in (3, 4, 5):
+        service.open_issue(HumanConsultationIssue(
+            issue_id=f"HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-C{cycle}",
+            meeting_id="LR-TEST", reason_code="FAST_SCIENCE_REVIEW_HUMAN_REQUIRED",
+            stage="FAST_SCIENCE_REVIEW", question="Old frozen technical failure",
+            options=["RETRY_WRITER_LOCAL_REPAIR", "REWRITE_WHOLE_MODULE", "PAUSE_FOR_MANUAL_REVIEW"],
+            context={
+                "module_id": "RM-01",
+                "recheck_path": "public/literature_report/fast/RM-01/science_recheck_v1.json",
+                "last_problem": f"missing C citation in cycle {cycle}",
+            },
+        ))
+
+    old_files = {path: path.read_bytes() for path in
+                 (tmp_path / "human_private/consultations").glob("*.json")}
+    ruling = runner._resume_local_format_consultation(SimpleNamespace(module_id="RM-01"), 2)
+
+    assert ruling.decision == "RETRY_WRITER_LOCAL_REPAIR"
+    assert service.open_issues() == []
+    assert all(path.read_bytes() == content for path, content in old_files.items())
+    for cycle in (3, 4, 5):
+        assert (tmp_path / "human_private/consultations" /
+                f"HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-C{cycle}.withdrawn.json").is_file()
+
+
+def test_local_format_resume_withdraws_fixed_legacy_citation_failure_and_keeps_science_retry(
+    tmp_path,
+):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    consultations = tmp_path / "human_private/consultations"
+    service = HumanConsultationService(runner.repo)
+    recovery_id = "HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-RECOVERY"
+    service.open_issue(HumanConsultationIssue(
+        issue_id=recovery_id, meeting_id="LR-TEST",
+        reason_code="FAST_SCIENCE_REVIEW_HUMAN_REQUIRED", stage="FAST_SCIENCE_REVIEW",
+        question="One repair retry", options=["RETRY_WRITER_LOCAL_REPAIR", "PAUSE_FOR_MANUAL_REVIEW"],
+        context={"module_id": "RM-01", "last_problem": "legacy citation"},
+    ))
+    service.resolve(
+        issue_id=recovery_id, decision="RETRY_WRITER_LOCAL_REPAIR",
+        rationale="Proceed with a corrected local patch", scope="Keep science review active",
+    )
+    failed_id = "HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-C4"
+    service.open_issue(HumanConsultationIssue(
+        issue_id=failed_id, meeting_id="LR-TEST",
+        reason_code="FAST_SCIENCE_REVIEW_HUMAN_REQUIRED", stage="FAST_SCIENCE_REVIEW",
+        question="Old citation preservation failure",
+        options=["RETRY_WRITER_LOCAL_REPAIR", "PAUSE_FOR_MANUAL_REVIEW"],
+        context={
+            "module_id": "RM-01",
+            "last_problem": (
+                "cannot preserve citations in body paragraph 45: the source paragraph's citations "
+                "are missing from the chapter citation catalog"
+            ),
+        },
+    ))
+    module_root = tmp_path / "public/literature_report/modules/RM-01"
+    source_draft = module_root / "writing_v071/writer_v1_validated.json"
+    source_draft.parent.mkdir(parents=True)
+    source_draft.write_text("{}", encoding="utf-8")
+    catalog = module_root / "research/chapter_citation_catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text('{"sources": []}', encoding="utf-8")
+
+    ruling = runner._resume_local_format_consultation(
+        SimpleNamespace(module_id="RM-01"), 2,
+    )
+
+    assert ruling is not None and ruling.decision == "RETRY_WRITER_LOCAL_REPAIR"
+    assert service.open_issues() == []
+    withdrawn = json.loads((consultations / f"{failed_id}.withdrawn.json").read_text())
+    assert "science re-review" in withdrawn["reason"]
+
+
+def test_local_format_skip_ruling_is_reused_without_another_writer_call(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    service = HumanConsultationService(runner.repo)
+    issue_id = "HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-RECOVERY"
+    service.open_issue(HumanConsultationIssue(
+        issue_id=issue_id, meeting_id="LR-TEST",
+        reason_code="FAST_SCIENCE_REVIEW_HUMAN_REQUIRED", stage="FAST_SCIENCE_REVIEW",
+        question="Skip the failed technical patch?",
+        options=[
+            "RETRY_WRITER_LOCAL_REPAIR", "REWRITE_WHOLE_MODULE",
+            "SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION", "PAUSE_FOR_MANUAL_REVIEW",
+        ],
+        context={"module_id": "RM-01", "recheck_path": "public/recheck.json", "last_problem": "no source map"},
+    ))
+    service.resolve(
+        issue_id=issue_id,
+        decision="SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION",
+        rationale="保留当前稿并在报告列明异议",
+        scope="仅跳过本次局部补丁；未解决的科学异议不得标为通过",
+    )
+    runner._invoke_service = lambda *_args, **_kwargs: pytest.fail("skip must not call Writer")
+    module = OutlineModule(
+        module_id="RM-01", title="Priority", research_questions=["Question"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+
+    with pytest.raises(FastLocalRepairSkipped, match="保留当前稿"):
+        runner._local_science_repair(
+            module, 2, WriterChapter(draft=ModuleDraft(
+                title="Priority", body_markdown="Frozen draft", short_summary="Summary",
+            )), tmp_path / "public/recheck.json",
+        )
+
+
+def test_reopened_science_revision_does_not_reapply_an_old_skip_ruling(tmp_path):
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    service = HumanConsultationService(runner.repo)
+    issue_id = "HC-FAST-SCIENCE-RM-01-LOCAL-FORMAT-V2-C1"
+    service.open_issue(HumanConsultationIssue(
+        issue_id=issue_id, meeting_id="LR-TEST",
+        reason_code="FAST_LOCAL_PATCH_TECHNICAL_REPAIR_HUMAN_REQUIRED",
+        stage="FAST_LOCAL_PATCH_TECHNICAL_REPAIR", question="Old failed local patch",
+        options=["SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION", "KEEP_PAUSED"],
+        context={"module_id": "RM-01", "last_problem": "old technical failure"},
+    ))
+    service.resolve(
+        issue_id=issue_id, decision="SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION",
+        rationale="Earlier decision", scope="Original freeze only",
+    )
+
+    ruling = runner._resume_local_format_consultation(
+        SimpleNamespace(module_id="RM-01"), 2, ignore_skip_ruling=True,
+    )
+
+    assert ruling is None
+    assert service.resolution(issue_id).decision == "SKIP_FAILED_PATCH_KEEP_DRAFT_WITH_LIMITATION"
+
+
+def test_frozen_limited_module_can_resume_science_revision_append_only(tmp_path, monkeypatch):
+    from project_ensemble.orchestration import literature_fast
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    runner.engine = SimpleNamespace(progress=SimpleNamespace(info=lambda *_args: None))
+    module = OutlineModule(
+        module_id="RM-01", title="Priority", research_questions=["Question"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+    original_chapter = WriterChapter(draft=ModuleDraft(
+        title="Priority", body_markdown="Original claim [C1-1].", short_summary="Original summary.",
+    ))
+    revised_chapter = WriterChapter(draft=ModuleDraft(
+        title="Priority", body_markdown="Corrected claim [C1-1].", short_summary="Corrected summary.",
+    ))
+    base = Path("public/literature_report/modules/RM-01")
+    old_outcome_relative = base / "module_outcome.json"
+    old_outcome = {
+        "module_id": "RM-01", "title": "Priority", "status": "ADOPTED",
+        "draft_path": str(base / "drafts/fast-v1.json"),
+        "short_summary": "Original summary.", "local_science_check_status": "MATERIAL_PROBLEM",
+        "local_science_check_path": str(base / "fast_science_limitation.json"),
+    }
+    old_outcome_path = tmp_path / old_outcome_relative
+    old_outcome_path.parent.mkdir(parents=True)
+    old_outcome_path.write_text(json.dumps(old_outcome), encoding="utf-8")
+    old_outcome_bytes = old_outcome_path.read_bytes()
+    writer_path = tmp_path / base / "writing_v071/writer_v1_validated.json"
+    writer_path.parent.mkdir(parents=True)
+    writer_path.write_text(original_chapter.model_dump_json(), encoding="utf-8")
+    review_path = tmp_path / "public/literature_report/fast/RM-01/science_review_v1.json"
+    review_path.parent.mkdir(parents=True)
+    review_path.write_text(json.dumps({"reviews": [{"checklist": {
+        "issues": [{"questioned_claim": "Original objection"}],
+        "glossary_corrections": [],
+    }}]}), encoding="utf-8")
+
+    service = HumanConsultationService(runner.repo)
+    reopen_id = "HC-FAST-SCIENCE-RM-01-REOPEN-REVISION-02-TRY-01"
+    service.open_issue(HumanConsultationIssue(
+        issue_id=reopen_id, meeting_id="LR-TEST",
+        reason_code="FAST_SCIENCE_REVISION_REOPEN_HUMAN_REQUIRED",
+        stage="FAST_SCIENCE_REVISION_REOPEN", question="Return to science revision?",
+        options=["REOPEN_FOR_SCIENCE_REVISION", "KEEP_CURRENT_LIMITATION_AND_CONTINUE"],
+        context={"module_id": "RM-01"},
+    ))
+    service.resolve(
+        issue_id=reopen_id, decision="REOPEN_FOR_SCIENCE_REVISION",
+        rationale="Keep the science objection active", scope="Create a new revision",
+    )
+    runner._effective_fast_outline = lambda _module_id: Path("approved_outline.json")
+
+    def local_repair(_module, version, _chapter, _review, **kwargs):
+        assert version == 2
+        assert kwargs["reopening_after_previous_skip"] is True
+        return tmp_path / base / "drafts/fast-v2.json", revised_chapter
+
+    runner._local_science_repair = local_repair
+    runner._recheck_science_revision = lambda _module, chapter, source_review, _dossier, version: (
+        (chapter.draft.body_markdown == "Corrected claim [C1-1]."
+         and source_review == review_path and version == 2),
+        tmp_path / "public/literature_report/fast/RM-01/science_recheck_v2.json",
+    )
+    monkeypatch.setattr(
+        literature_fast, "_freeze_glossary",
+        lambda *_args, **_kwargs: tmp_path / "public/literature_report/writing_v071/glossary_after_RM-01_revision_2.json",
+    )
+
+    result = runner._write_module(
+        SimpleNamespace(modules=[module]), module, 1, tmp_path / "dossier.json",
+    )
+
+    assert result["module_outcome_revision"] == 2
+    assert result["local_science_check_status"] == "PASS"
+    assert result["short_summary"] == "Corrected summary."
+    assert old_outcome_path.read_bytes() == old_outcome_bytes
+    assert (tmp_path / base / "module_outcome_revision_2.json").is_file()
+    assert service.resolution(reopen_id).decision == "REOPEN_FOR_SCIENCE_REVISION"
+
+
+def test_skipping_failed_local_patch_retains_draft_and_records_unresolved_objections(
+    tmp_path, monkeypatch,
+):
+    from project_ensemble.orchestration import literature_fast
+    from project_ensemble.storage.documents import ImmutableDocumentStore
+
+    runner = object.__new__(FastLiteratureRunner)
+    runner.repo = SimpleNamespace(
+        root=tmp_path, meeting_id="LR-TEST", docs=ImmutableDocumentStore(tmp_path),
+        events=SimpleNamespace(append=lambda *_args, **_kwargs: None),
+    )
+    runner.engine = SimpleNamespace(progress=SimpleNamespace(info=lambda *_args: None))
+    runner._v071_progress = (1, 1)
+    module = OutlineModule(
+        module_id="RM-01", title="Priority", research_questions=["Question"],
+        required_evidence=["Primary sources"], source_submission_refs=["S-1"],
+    )
+    chapter = WriterChapter(draft=ModuleDraft(
+        title="Priority", body_markdown="Frozen original claim [C1-1].", short_summary="Original summary.",
+    ))
+    draft_relative = Path("public/literature_report/modules/RM-01/writing_v071/writer_v1_validated.json")
+    review_relative = Path("public/literature_report/fast/RM-01/science_review_v1.json")
+    review_path = tmp_path / review_relative
+    review_path.parent.mkdir(parents=True)
+    review_path.write_text(json.dumps({"reviews": [{"checklist": {
+        "issues": [{
+            "location_excerpt": "Original claim",
+            "questioned_claim": "The claim is overbroad.",
+            "why_it_matters": "It affects the report conclusion.",
+            "suggested_response": "Qualify the claim.",
+        }],
+        "glossary_corrections": [],
+    }}]}), encoding="utf-8")
+    runner._effective_fast_outline = lambda _module_id: Path("approved_outline.json")
+    runner._science_review = lambda *_args: review_path
+    runner._local_science_repair = lambda *_args: (_ for _ in ()).throw(
+        FastLocalRepairSkipped("Human chose to skip this failed patch")
+    )
+    runner._read_json = lambda relative: json.loads((tmp_path / relative).read_text(encoding="utf-8"))
+    runner._recheck_science_revision = lambda *_args: pytest.fail(
+        "skipping must not be reported as a successful science recheck"
+    )
+    monkeypatch.setattr(
+        literature_fast, "_writer_chapter",
+        lambda *_args, **_kwargs: (tmp_path / draft_relative, chapter),
+    )
+    monkeypatch.setattr(literature_fast, "_freeze_glossary", lambda *_args: tmp_path / "glossary.json")
+
+    outcome = runner._write_module(
+        SimpleNamespace(modules=[module]), module, 1, tmp_path / "dossier.json",
+    )
+
+    assert outcome["draft_path"] == str(draft_relative)
+    assert outcome["local_science_check_status"] == "MATERIAL_PROBLEM"
+    assert chapter.draft.body_markdown == "Frozen original claim [C1-1]."
+    note = json.loads((tmp_path / outcome["local_science_check_path"]).read_text(encoding="utf-8"))
+    problems = [item["problem"] for item in note["checks"]]
+    assert any("The claim is overbroad" in problem for problem in problems)
+    assert any("跳过不代表科学复核通过" in problem for problem in problems)
 
 
 def test_fast_local_science_repair_changes_only_exact_selected_passages(tmp_path):
@@ -1956,6 +2283,12 @@ def test_fast_local_science_repair_uses_paragraph_numbers_for_duplicate_text_and
 
     def invoke(_participant_id, *, stage, **_kwargs):
         called_stages.append(stage)
+        current = _kwargs["user"]["current_draft"]
+        assert "glossary_additions" not in current
+        assert "revision_responses" not in current
+        assert "inference_labels" not in current["draft"]
+        assert len(current["editable_body_paragraphs"]) == 2
+        assert current["editable_inference_labels"] == []
         return FastLocalScienceRepair(edits=[{
             "paragraph_number": 2,
             "new_text": "The second paragraph now states the qualified result.",
@@ -2022,7 +2355,18 @@ def test_fast_local_science_repair_can_edit_a_glossary_entry_by_term(tmp_path):
     assert repaired.glossary_additions[0].explanation.startswith("A chosen line")
 
 
-def test_fast_local_science_repair_hides_legacy_packet_ids_and_rebuilds_citations(tmp_path):
+@pytest.mark.parametrize(
+    ("citation_marker", "expected_citation_text"),
+    [
+        ("C8-1", "Another revised description [C8-1]."),
+        ("［C8-1］", "Another revised description [C8-1]."),
+        ("【C8-1】", "Another revised description [C8-1]."),
+        ("(C8-1)", "Another revised description ([C8-1])."),
+    ],
+)
+def test_fast_local_science_repair_hides_legacy_packet_ids_and_rebuilds_citations(
+    tmp_path, citation_marker, expected_citation_text,
+):
     from project_ensemble.storage.documents import ImmutableDocumentStore
 
     runner = object.__new__(FastLiteratureRunner)
@@ -2047,6 +2391,9 @@ def test_fast_local_science_repair_hides_legacy_packet_ids_and_rebuilds_citation
         "title": "A source title", "authors": ["A. Author"],
         "publication_year": 1991, "doi": "10.1000/example",
     }]}), encoding="utf-8")
+    manifest = tmp_path / "identity_private/meeting_manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"technician_model": ["fake", "technician"]}), encoding="utf-8")
     recheck = tmp_path / "public/literature_report/fast/RM-08/science_recheck_v2.json"
     recheck.parent.mkdir(parents=True)
     recheck.write_text(json.dumps({"votes": [{"remaining_material_problems": [
@@ -2054,23 +2401,35 @@ def test_fast_local_science_repair_hides_legacy_packet_ids_and_rebuilds_citation
     ]}]}), encoding="utf-8")
     original = WriterChapter(draft=ModuleDraft(
         title="Interface scaling",
-        body_markdown="The 1991 study reports the result [RP-OLD].",
-        short_summary="The result is reported in [RP-OLD].",
-        cited_packet_ids=["RP-OLD"],
+        body_markdown=(
+            "The 1991 study reports the result [RP-OLD].\n\n"
+            "Another legacy-cited claim [RP-UNMAPPED].\n\n"
+            "An unmapped citation is removed from this edited passage [RP-UNMAPPED].\n\n"
+            "An untouched legacy passage [RP-UNMAPPED]."
+        ),
+        short_summary="The result is reported [RP-UNMAPPED].",
+        cited_packet_ids=["RP-OLD", "RP-UNMAPPED"],
     ))
-    captured_users = []
+    captured_calls = []
 
-    def invoke(_participant_id, *, user, **_kwargs):
-        captured_users.append(user)
+    def invoke(participant_id, *, stage, schema, user, **_kwargs):
+        captured_calls.append((participant_id, stage, schema, user))
+        assert participant_id == "WRITER"
+        assert schema is FastLocalScienceRepair
         return FastLocalScienceRepair(edits=[
             {
                 "paragraph_number": 1,
-                "new_text": "The 1991 study reports the result [C8-1].",
+                "new_text": "The 1991 study reports the result.",
                 "objection_numbers": [1],
             },
             {
-                "target_field": "short_summary", "replace_entire_field": True,
-                "new_text": "The 1991 study reports the result [C8-1].",
+                "paragraph_number": 2,
+                "new_text": f"Another revised description {citation_marker}.",
+                "objection_numbers": [1],
+            },
+            {
+                "paragraph_number": 3,
+                "new_text": "A qualified statement without an obsolete source marker.",
                 "objection_numbers": [1],
             },
         ])
@@ -2078,12 +2437,38 @@ def test_fast_local_science_repair_hides_legacy_packet_ids_and_rebuilds_citation
     runner._invoke_service = invoke
     _draft_path, repaired = runner._local_science_repair(module, 3, original, recheck)
 
-    prompt_payload = json.dumps(captured_users[0], ensure_ascii=False)
+    prompt_payload = json.dumps(captured_calls[0][3], ensure_ascii=False)
     assert "RP-OLD" not in prompt_payload
+    assert "RP-UNMAPPED" not in prompt_payload
     assert "[来源待核]" in prompt_payload
+    assert '"citations_to_preserve": ["C8-1"]' in prompt_payload
+    assert [call[0] for call in captured_calls] == ["WRITER"]
     assert "[C8-1]" in repaired.draft.body_markdown
-    assert "[C8-1]" in repaired.draft.short_summary
+    assert "UNAUTHORIZED CHANGE" not in repaired.draft.body_markdown
+    assert expected_citation_text in repaired.draft.body_markdown
+    assert "[RP-" not in repaired.draft.body_markdown
+    assert "[RP-" not in repaired.draft.short_summary
+    assert "An untouched legacy passage." in repaired.draft.body_markdown
     assert repaired.draft.cited_packet_ids == ["RP-OLD"]
+    applied = json.loads((
+        tmp_path / "public/literature_report/modules/RM-08/writing_v071/"
+        "writer_v3_local_patch_applied.json"
+    ).read_text(encoding="utf-8"))
+    assert applied["citation_restorations"] == [
+        {"target": "body paragraph 1", "citation_ids": ["C8-1"]},
+    ]
+    assert applied["citation_format_normalizations"] == [
+        {"target": "body paragraph 2", "citation_ids": ["C8-1"]},
+    ]
+    assert applied["technician_item_repair"]["status"] == "NOT_NEEDED"
+    assert any(
+        item["status"] == "UNMAPPED_LEGACY_MARKER_REMOVED_FROM_REPLACED_TEXT"
+        for item in applied["legacy_citation_cleanup"]
+    )
+    assert sum(
+        item["count"] for item in applied["legacy_citation_cleanup"]
+        if item["status"] == "UNMAPPED_LEGACY_MARKER_REMOVED"
+    ) == 2
 
 
 def test_fast_local_science_objections_can_be_built_from_first_review(tmp_path):

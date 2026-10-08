@@ -1,4 +1,5 @@
 import io
+import re
 
 import pytest
 from pypdf import PdfReader
@@ -7,7 +8,9 @@ from project_ensemble.orchestration.final_publication import _inline_markup, res
 from project_ensemble.orchestration.academic_pdf import (
     _pdf_reader_note_fallback, render_academic_review_pdf,
 )
-from project_ensemble.orchestration.academic_html import render_academic_review_html
+from project_ensemble.orchestration.academic_html import (
+    normalize_reader_citation_groups, render_academic_review_html,
+)
 from project_ensemble.orchestration.math_rendering import (
     normalize_fragmented_inline_math,
     normalize_math_operator_commands,
@@ -202,14 +205,15 @@ def test_academic_html_citation_cards_link_to_source_and_pdf_safely():
     assert "javascript:alert(1)" not in rendered
     assert "noopener noreferrer" in rendered
     assert 'id="selection-menu"' in rendered
-    assert '<summary>我的高亮、批注与问答</summary>' in rendered
+    assert 'role="tablist" aria-label="阅读导航"' in rendered
     assert "const inReadingOrder = [...records].sort(" in rendered
     assert 'id="annotation-collapse"' in rendered
-    assert "document.getElementById('annotation-tools').open = false" in rendered
-    assert "button.className = 'annotation-locate'" in rendered
-    assert 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis' in rendered
+    assert "window.EnsembleReaderUI.tab('toc')" in rendered
+    assert "content.className = 'annotation-locate'" in rendered
+    assert 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer' in rendered
     assert "openRecord(record.id, true)" in rendered
-    assert "if (record.note || forceEdit || record.qaThreads?.length)" in rendered
+    assert "const editing = forceEdit || pendingNotes.has(id)" in rendered
+    assert "setMode(editing)" in rendered
     assert 'id="annotation-save-html"' in rendered
     assert 'id="embedded-annotations">[]</script>' in rendered
     assert "copy.dataset.annotationKey = key + ':shared:'" in rendered
@@ -219,7 +223,7 @@ def test_academic_html_citation_cards_link_to_source_and_pdf_safely():
     assert '可使用 $...$ 或 $$...$$ 写公式' in rendered
     assert "window.MathJax.typesetPromise([preview])" in rendered
     assert "preview.replaceChildren(notePreviewNodes(value))" in rendered
-    assert "formula.textContent = delimiter === '$$'" in rendered
+    assert "window.EnsembleReaderMarkdown.render(nodes, value)" in rendered
     assert 'id="qa-open"' in rendered
     assert 'id="annotation-ask-ai"' in rendered
     assert 'function selectedTextAcrossMath(block, range, allowOverlap)' in rendered
@@ -234,8 +238,11 @@ def test_academic_html_citation_cards_link_to_source_and_pdf_safely():
     assert 'qaHistoryKey = key + \':qa-history-v1\'' in rendered
     assert "event.data.type === 'ENSEMBLE_QA_SAVE'" in rendered
     assert "event.data.type === 'ENSEMBLE_QA_DELETE'" in rendered
-    assert "button.textContent = (record.note ? '批注' : '高亮')" in rendered
-    assert "remove.addEventListener('click', () => deleteRecord(record.id))" in rendered
+    assert "window.EnsembleReaderMarkdown.render(summary, value)" in rendered
+    assert 'id="reader-entry-panel"' in rendered
+    assert "window.EnsembleReaderMarkdown.render(entryBody, value)" in rendered
+    assert "if (!record.note.trim() && !record.qaThreads?.length) continue" in rendered
+    assert "() => deleteRecord(record.id)" in rendered
     assert "removeLegacyQaThreads(threadIds)" in rendered
 
 
@@ -246,6 +253,19 @@ def test_academic_html_normalizes_parenthesized_citation_runs_without_touching_s
     assert 'data-references="5,6,7"' in rendered
     assert "（[5]；[6]；[7]）" not in rendered
     assert 'data-references="8"' in rendered
+
+
+def test_single_parenthesized_citation_is_normalized_without_touching_prose_or_links():
+    source = "结论（[356]）；补充说明 ([357])。参见（[358]；[359]）。另见（[360]，[361]）。"
+    assert normalize_reader_citation_groups(source) == (
+        "结论[356]；补充说明 [357]。参见[358, 359]。另见[360, 361]。"
+    )
+    assert normalize_reader_citation_groups("解释（见 [1]）；[链接]([2])。") == (
+        "解释（见 [1]）；[链接]([2])。"
+    )
+    rendered = render_academic_review_html("# 标题\n\n" + source, meeting_id="LR-TEST")
+    assert "（[356]）" not in rendered.split("<main><article>", 1)[1].split("</article>", 1)[0]
+    assert 'data-references="356"' in rendered
 
 
 def test_academic_html_renders_reader_note_in_clickable_drawer_without_raw_definition():
@@ -310,16 +330,16 @@ def test_html_qa_is_sandboxed_and_escapes_report_content():
     assert "\\u003c/script\\u003e" in source
     assert "</script><script>alert('bad')" not in source
     assert "localStorage.setItem(key, JSON.stringify(records))" in rendered
-    assert '<nav aria-label="目录"><div class="toc-scroll">' in rendered
+    assert 'id="toc-panel" role="tabpanel"' in rendered
     assert rendered.index('id="annotation-list"') < rendered.index('</nav>')
     assert rendered.index('id="annotation-highlight"') > rendered.index('</nav>')
     assert 'target.scrollIntoView' in rendered
-    assert 'if (currentId === record.id)' in rendered
+    assert "appendEntry(record.note, () => openNoteEntry(record)" in rendered
     assert 'id="annotation-close">收起 ×' in rendered
     assert "type: 'ENSEMBLE_QA_NEW_FOCUS'" in rendered
     assert 'selected_text: focusText' in source
     assert '<main><article>' in rendered
-    assert 'position:fixed; z-index:9; display:flex' in rendered
+    assert 'position:fixed; z-index:10; display:flex' in rendered
 
 
 def test_html_annotations_are_scoped_to_exact_report_content():
@@ -356,6 +376,63 @@ def test_academic_html_does_not_leave_dollars_around_display_math():
     assert '<span class="math inline"' in rendered
     assert '<p>$' not in rendered
     assert '<code class="language-tex">$$literal code$$' in rendered
+
+
+def test_academic_html_repairs_duplicate_glossary_fences_and_inline_delimiters_in_display():
+    from project_ensemble.orchestration.math_rendering import repair_nested_display_fences
+    source = (
+        "# 报告\n\n## 术语表\n\n"
+        "- **幂距离**: 定义。\n\n"
+        "$$\n$$\n" + r"\pi_i(x)=\|x-\(p_i\)\|^2-\(w_i\)." + "\n$$\n"
+        + r"其中 \(p_i\) 是站点，\(w_i\) 是权重。" + "\n$$\n\n"
+        "- **质量**: 定义。\n\n$$\n$$\n"
+        + r"\(M_i\)(w)=\int_{\(V_i\)(w)}\rho(x)\,\mathrm{d}x," + "\n"
+        + r"\qquad \sum_i \(M_i\)^*=\int_\Omega\rho(x)\,\mathrm{d}x." + "\n$$\n"
+        + r"\(\Omega\) 是区域，\(M_i^*\) 是目标质量。" + "\n$$\n\n"
+        "- **后续词条**: 仍应正常换行。\n"
+    )
+    repaired = repair_nested_display_fences(source)
+    assert repaired.count("$$") == 4
+    assert repair_nested_display_fences(repaired) == repaired
+    rendered = render_academic_review_html(source, meeting_id="LR-TEST")
+    article = rendered.split("<main><article>", 1)[1].split("</article>", 1)[0]
+    assert article.count('<div class="math display"') == 2
+    assert 'data-tex="\\pi_i(x)=\\|x-p_i\\|^2-w_i."' in article
+    assert 'data-tex="M_i(w)=\\int_{V_i(w)}' in article
+    assert r'\sum_i M_i^*' in article
+    assert r'data-tex="\(' not in article
+    assert "是目标质量。" in re.sub(r"<[^>]+>", "", article)
+    assert '<p>$$' not in article
+    assert 'data-term="后续词条">后续词条</button></strong>' in article
+
+
+def test_glossary_formula_formatter_preserves_existing_math_and_explanation_boundaries():
+    from project_ensemble.orchestration.math_rendering import glossary_formula_markdown
+    formula = "$$\n" + r"V_i=\{x:\|x-p_i\|\leq\|x-p_j\|\}." + "\n$$\n" + r"其中 \(x\) 是位置。"
+    assert glossary_formula_markdown(formula) == formula
+    assert glossary_formula_markdown(r"\[x=y\]") == r"\[x=y\]"
+    assert glossary_formula_markdown(r"\(x=y\)") == "$$\nx=y\n$$"
+    assert glossary_formula_markdown(r"\(x=y\)，其中 \(x\) 是位置。") == r"\(x=y\)，其中 \(x\) 是位置。"
+    assert glossary_formula_markdown(r"\gamma = \partial F/\partial L") == "$$\n" + r"\gamma = \partial F/\partial L" + "\n$$"
+
+
+def test_duplicate_fence_repair_also_handles_expressions_without_an_equal_sign():
+    from project_ensemble.orchestration.math_rendering import repair_nested_display_fences
+    source = "$$\n$$\n" + r"\mathbb E_{\boldsymbol X\sim\mathcal N(\mu,\Sigma)}[\gamma(\boldsymbol X)]" + "\n$$\n" + r"\(\boldsymbol X\) 是随机向量。" + "\n$$\n"
+    repaired = repair_nested_display_fences(source)
+    assert repaired.count("$$") == 2
+    assert r"\(\boldsymbol X\) 是随机向量。" in repaired
+
+
+def test_display_fence_repair_preserves_valid_math_code_and_ordinary_prose():
+    from project_ensemble.orchestration.math_rendering import repair_nested_display_fences
+    source = (
+        "# Report\n\n$$\nx=y\n$$\n\n"
+        "The description stays outside.\n\n"
+        "```tex\n$$\n$$\nx=y\n$$\n中文解释。\n$$\n```\n\n"
+        + r"普通文字 \(x\) 不变。" + "\n\n" + r"\[a=b\]" + "\n"
+    )
+    assert repair_nested_display_fences(source) == source
 
 
 def test_academic_html_does_not_swallow_glossary_after_nested_display_fences():

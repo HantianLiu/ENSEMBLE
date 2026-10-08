@@ -1,4 +1,4 @@
 """Project_ENSEMBLE reference implementation."""
 
-__version__ = "0.7.3"
+__version__ = "0.7.5"
 GOVERNANCE_VERSION = "0.7.1"

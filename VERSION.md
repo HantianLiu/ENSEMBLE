@@ -1,8 +1,8 @@
 # Version
 
-Project_ENSEMBLE software v0.7.3
+Project_ENSEMBLE software v0.7.5
 
-Prepared: 2026-09-30
+Prepared: 2026-10-07
 Governance baseline: v0.7.1
 
 This release preserves v0.7.0 meetings under the `ensemble-old` command and uses

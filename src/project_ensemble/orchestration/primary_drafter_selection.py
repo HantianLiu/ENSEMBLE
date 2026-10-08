@@ -10,6 +10,7 @@ from project_ensemble.orchestration.engine import MeetingEngine
 from project_ensemble.runtime.model_lanes import run_bounded_representative_lanes
 from project_ensemble.runtime.model_replacements import current_runtime_for
 from project_ensemble.storage.meeting import MeetingRepository
+from project_ensemble.runtime.prompt_contract import prompt_contract_version
 
 
 class PrimaryDrafterRanking(BaseModel):
@@ -45,6 +46,18 @@ class PrimaryDrafterSelectionRunner:
         self.repo = repo
         self.engine = engine
         self.max_output_tokens = max_output_tokens
+
+    def _ballot_system_text(self) -> str:
+        if prompt_contract_version(self.repo.root) >= 2:
+            return (
+                "Task: select a Primary Drafter using only the approved text and current public "
+                "substantive work. Return only the requested sealed ballot."
+            )
+        return (
+            "Task: participate only in a sealed Primary Drafter selection. "
+            "The private Drafting Alignment scores and ranks are unavailable and must not "
+            "be inferred or requested. Base the choice on the approved text and public work."
+        )
 
     def run(
         self,
@@ -239,11 +252,7 @@ class PrimaryDrafterSelectionRunner:
             rid = record["representative_id"]
             response = self.engine.invoke_participant(
                 rid,
-                system_text=(
-                    "Task: participate only in a sealed Primary Drafter selection. "
-                    "The private Drafting Alignment scores and ranks are unavailable and must not "
-                    "be inferred or requested. Base the choice on the approved text and public work."
-                ),
+                system_text=self._ballot_system_text(),
                 user_text=(
                     prompt
                     + "\n\nCANDIDATE IDS:\n"

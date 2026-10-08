@@ -91,10 +91,11 @@ claim 才以 `QC_FAILED` 终结，不阻却会议。全部 claim 达到 `STAGED_
 发布。
 
 同一 release barrier 同时约束来源原文。正式 Research Round 中下载的 PDF、其他原始
-文档、provenance record、manifest 和 ZIP 在整轮完成前都只进入治理私有 staging 区；
+文档、provenance record 和 manifest 在整轮完成前都只进入治理私有 staging 区；
 不能通过文件名、论文标题或提前更新的公共文献包泄露部分检索结果。全部 claim 终结后，
-evidence packet batch、完整 document batch、manifest 与 `literature_bundle.zip` 必须在
-同一次 release 中公开。恢复时对完整暂存文件按 SHA-256 复核并保留，只补失败或不完整
+evidence packet batch、完整 document batch 与 manifest 必须在同一次 release 中公开。
+ZIP 仅在 Human 请求导出时生成，不长期保存；导出不得越过同一 release barrier。
+恢复时对完整暂存文件按 SHA-256 复核并保留，只补失败或不完整
 下载。
 
 Human 明确单独执行的 `ensemble-v07 research-claim` 不属于密封 Research Round，没有批次内
@@ -218,14 +219,18 @@ Retriever 必须采用可替换的多后端路由，而不是把某一商业搜�
 - 时效性事实优先检索监管机构或直接发布者，并以独立 Web 搜索执行对冲；
 - general claim 使用通用 Web 搜索，同时继续执行四类对抗性查询。
 
-v0.7 试行实现采用 **OpenAlex primary + Tavily supplemental**：OpenAlex 是每条 claim
-必须调用的主要学术索引后端；Tavily 是通用 Web 补充后端，用于发现标准组织、官方文档、
-软件资料、时效性一手来源以及 OpenAlex 未覆盖的反证和替代解释。本试行版不再要求配置
-Brave、Exa 或模型供应商自带的联网工具。Tavily 与 OpenAlex 都必须分别执行 supporting、
-contradictory、limitations 和 alternatives 四类非空查询；Tavily 返回的相关性分数、摘要
-或排序只属于候选召回信息，不是 evidence status，也不得替 Research Desk 作实体判断。
+当前实现按 Human 在每场会议初始化时选择的引擎路由：学术索引为 OpenAlex；通用搜索可选
+Tavily、Parallel 或禁用，新会议默认禁用通用搜索。学术 claim 不因元数据为空、原文不可读
+或连接故障而自动调用付费通用搜索；限额或连接故障回退须有 Human 明确授权，且仅限所选
+供应商，授权不随供应商切换自动转移。通用 claim 使用已选择并允许的通用引擎。
+实际被路由调用的引擎仍必须分别执行 supporting、contradictory、limitations 和 alternatives
+四类非空查询，不要求健康的学术检索同时调用付费网页引擎。Fast 探索计划漏填来源类型时
+默认 ACADEMIC；非学术类型须明确指定。Parallel 只接受 fast／turbo，每次结果上限 1–10，
+必须将上限传给服务端，不得靠丢弃超额结果规避计费。不得自动调用 Parallel 付费 Extract；
+Tavily 付费 Extract 默认关闭，只有明确配置启用时才用于非学术网页。论文原文补找优先使用
+学术元数据。任何引擎的排序、分数与搜索摘录只是候选信息，不是 evidence status。
 
-Tavily 候选必须保留标题、原始 URL、返回摘要、查询目的和 provider request ID（若 API
+Tavily／Parallel 候选必须保留标题、原始 URL、返回摘要、查询目的和 provider request ID（若 API
 提供）。公开可直接访问的 URL 可由文献包下载器按原始响应归档；无法取得可读原文时仍按
 既有规则降为 `PROVISIONAL`。API key 只从环境变量或 Human 明确配置的本地 secret file
 读取，不得写入会议文档、事件、检索轨迹或公共 packet。
@@ -400,10 +405,15 @@ Audit Meeting 可检查 cherry-picking、反证遗漏、不当来源筛选和 fr
 
 ## 8A. Human 文献包与原始文档
 
-每场启用 Research Desk 的会议维护一个 Human 可直接下载的会议级文献包：
-`public/research/literature_bundle.zip`。展开后至少包含 `manifest.json`、说明文件以及
+每场启用 Research Desk 的会议维护一个 Human 可按需打包下载的会议级文献目录：
+`public/research/literature_bundle/`。至少包含 `manifest.json`、说明文件以及
 `documents/` 中依法公开取得的原始文档。特别是 retriever 提供合法公开 PDF URL 时，
 系统必须下载原始 PDF，不作内容改写，并记录：
+
+ZIP 是可重建的导出副本，不是唯一的原文保管载体；研究刷新与精简归档不长期保留 ZIP。
+Human 可用 `ensemble gather` 导出文献 PDF ZIP。清理旧归档的 ZIP 前必须验证原归档与
+全部 ZIP 内容，保存任何独有文件或不同版本，并追加可核对的维护记录；不能删除原文件、
+改写冻结归档清单，或借缓存清理绕过接续的完整性校验。
 
 - 对应的 `packet_id` 与 `source_id`；
 - citation URL、原始文档 URL 和最终解析 URL；
@@ -447,7 +457,8 @@ QC 必须采用最小隔离范围。若缺陷可以定位到单个候选来源�
 同一 Research Round 的其他 packet、文献原文和 manifest 整批发布；公共快照将整轮标记为
 `PARTIAL_WITH_QC_EXCLUSIONS` 并给出被隔离 claim 数，不把部分发布伪装成无缺陷完成。
 
-单个检索后端暂时不可用时也采用最小隔离范围：若至少一个其他已配置后端仍能完成
+单个检索后端暂时不可用时也采用最小隔离范围：若至少一个其他已配置、且本会议允许并授权
+用于本次路由的后端仍能完成
 supporting、contradictory、limitations 和 alternatives 四类对抗检索，则记录失败后端，使用
 剩余后端继续，并把公开 packet 的 retrieval coverage 强制降为 `LOW`；不得仅因 OpenAlex、
 Tavily 或其他单一后端失败而暂停会议。只有所有检索后端均不可用、模型供应商在规定重试后

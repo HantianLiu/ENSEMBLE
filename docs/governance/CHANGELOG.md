@@ -1,5 +1,71 @@
 # Changelog
 
+## Human-authorized ID-based evidence reading — 2026-10-07
+
+- Freeze prompt/context contract v3 and read protocol v1 for new meetings;
+  absent read flags in older meetings retain the previous request behavior.
+- Existing writing, local scientific revision, rendering and science review
+  calls may request complete findings or verified meeting-local public original
+  fragments by source ID. No new model role, web search or arbitrary path access.
+- Respect public module records and released research snapshots. Do not expose
+  staging packets, private institutional originals or another sealed opinion.
+- Optional read failures stay local; bounded read turns do not constitute
+  scientific acceptance, waived objections or a new scientific review round.
+- Preserve original exchanges and fragment provenance for recovery. Include
+  both system and user in character preflight, and recognize neutral/Chinese
+  context section headers during layout-only replay.
+
+## Human-requested distinct star markers and current-section navigation — 2026-10-07
+
+- Move important-note stars into a separate column beside the position/search
+  rail; enlarge solid gray markers with white outlines and shadows. Preserve
+  ordinary annotation ticks and keep cards/pane controls clear of both columns.
+- Track the current chapter/subsection on scroll and fragment navigation with
+  aria-current, bold text, a pale background and an accent bar. Reveal offscreen
+  entries by scrolling the directory only, without moving the article.
+- Clear transient marker/current-section views when exporting annotated HTML;
+  saved note/star records and report identity remain unchanged. Hide both rails
+  when printing and respect reduced-motion preferences.
+
+## Human-requested reader focus and light palette — 2026-10-06
+
+- Add opt-in HTML reader focus: hover previews, click pins, Escape/unmarked
+  body clicks unpin; otherwise the visible note nearest the midline is focused.
+- Emphasize source spans and lift their note card with layered shadows and
+  motion while muting non-focused text/cards without shifting the article.
+- Add White / Butter Paper appearance choices, including the sandboxed Q&A frame.
+  Browser-only appearance preferences do not modify annotation schema or keys.
+- Annotated HTML copies retain palette/toggle but clear transient focus.
+  Printing restores readable contrast; reduced-motion settings disable effects.
+- No meeting, evidence, vote, archive or frozen provenance records are changed.
+
+## Human-requested lightweight read-only audit — 2026-10-06
+
+- Add a home-screen audit entry and `ensemble audit`: select multiple meetings
+  first, then mechanical checks only or fresh independent model readings.
+- Archived meetings check retained-file integrity, final-text citations and
+  readability; deleted vote/revision history is UNAVAILABLE, never presumed PASS.
+  Unfinished meetings do not reveal sealed votes or use module drafts as final text.
+- Completed unarchived meetings additionally check recognized simple ballots,
+  receipts and tallies, known local-revision delivery records, released fast
+  science rechecks and repeated unchanged revisions. Explicit coverage limits
+  remain visible; these checks do not certify scientific truth.
+- Reports and selected-input snapshots live outside source meetings; frozen
+  artifacts, ballots and meeting status are untouched. Model requests have no
+  audit-layer retry/rewrite loop, and failures preserve mechanical checkpoints.
+- This is a non-binding lightweight tool, not implementation of the full Audit
+  Conference, its strategic-behavior review, or Correction state machine.
+
+## Human-requested literature ZIP storage policy — 2026-10-06
+
+- Keep meeting-local originals, source catalogs, hashes, and evidence packets;
+  generate ZIP copies only for explicit exports, not on research refresh or archive.
+- Retiring a legacy archived ZIP verifies and preserves every ZIP member and appends
+  a maintenance record without rewriting frozen archive manifests. Inheritance
+  verifies the original manifest plus the supplemental retirement record.
+- The sealed research release barrier and scientific/evidence checks remain intact;
+  historical frozen governance snapshots are unchanged.
+
 ## v0.7.1 governance baseline — 2026-09-25
 
 - Added the trial literature-writing procedure for new literature-report

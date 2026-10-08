@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+from importlib.metadata import version
 from pathlib import Path
 from typing import Literal
 
@@ -33,6 +35,28 @@ _COMPLETE_DOCUMENTS = (
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _renderer_fingerprint(format_name: str) -> str:
+    """Invalidate derivatives when renderer code/assets or dependencies change."""
+    directory = Path(__file__).resolve().parent
+    names = [
+        "math_rendering.py", "report_palette.py", "literature_style.py",
+        "academic_html.py" if format_name == "html" else "academic_pdf.py",
+    ]
+    if format_name == "pdf":
+        names.append("final_publication.py")
+    files = [directory / name for name in names]
+    if format_name == "html":
+        files.extend(sorted((directory.parent / "assets").glob("reader_*")))
+    digest = hashlib.sha256()
+    for path in files:
+        if path.is_file():
+            digest.update(path.name.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    packages = ("markdown-it-py",) if format_name == "html" else ("reportlab", "matplotlib")
+    for package in packages:
+        digest.update(f"{package}:{version(package)}".encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _citation_links(root: Path) -> dict[str, dict[str, str]]:
@@ -150,6 +174,7 @@ def render_additional_formats(
         if source is None:
             raise ValueError("该已完成会议没有可补充排版的完整 Markdown 文稿")
         root = repo.root.resolve()
+        meeting_identifier = repo.meeting_id if (root / "public/meeting_manifest.json").is_file() else root.name
         selected_palette = palette or read_meeting_palette(root)
         if selected_palette not in PALETTES:
             raise ValueError("unknown report palette")
@@ -164,9 +189,16 @@ def render_additional_formats(
                 HTML_RENDERING_PROFILE if format_name == "html"
                 else "ACADEMIC_REVIEW_MATH_SAFE_V2"
             )
-            relative = target_directory / profile / selected_palette / f"report.{format_name}"
+            renderer_sha = _renderer_fingerprint(format_name)
+            reference_links = _citation_links(root) if format_name == "html" else {}
+            inputs_sha = _sha(json.dumps({
+                "renderer_sha256": renderer_sha, "reference_links": reference_links,
+                "mathjax_url": os.environ.get("ENSEMBLE_MATHJAX_URL") if format_name == "html" else None,
+            }, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+            edition_directory = target_directory / profile / selected_palette / inputs_sha[:16]
+            relative = edition_directory / f"report.{format_name}"
             path = root / relative
-            provenance_relative = target_directory / profile / selected_palette / f"report.{format_name}.provenance.json"
+            provenance_relative = edition_directory / f"report.{format_name}.provenance.json"
             provenance_path = root / provenance_relative
             if path.is_file():
                 if not provenance_path.is_file():
@@ -176,6 +208,8 @@ def render_additional_formats(
                         or frozen.get("output_sha256") != _sha(path.read_bytes())
                         or frozen.get("source_path") != str(source_relative)
                         or frozen.get("rendering_profile") != profile
+                        or frozen.get("renderer_sha256") != renderer_sha
+                        or frozen.get("rendering_inputs_sha256") != inputs_sha
                         or frozen.get("palette") != selected_palette):
                     raise ValueError(f"现有 {format_name.upper()} 衍生文件与来源记录不符；拒绝覆盖")
             else:
@@ -183,12 +217,12 @@ def render_additional_formats(
                     raise ValueError(f"现有 {format_name.upper()} 来源记录缺少对应文件；拒绝覆盖")
                 if format_name == "html":
                     output = render_academic_review_html(
-                        markdown, meeting_id=root.name, palette=selected_palette,
-                        reference_links=_citation_links(root),
+                        markdown, meeting_id=meeting_identifier, palette=selected_palette,
+                        reference_links=reference_links,
                     ).encode("utf-8")
                 else:
                     output, font = render_academic_review_pdf(
-                        markdown, meeting_id=root.name, palette=selected_palette,
+                        markdown, meeting_id=meeting_identifier, palette=selected_palette,
                         repair_formula=lambda formula, _error, _display: safe_pdf_font_grouping_repair(formula),
                     )
                     validate_pdf(output)
@@ -198,6 +232,8 @@ def render_additional_formats(
                     "source_sha256": source_sha,
                     "output_sha256": _sha(output),
                     "rendering_profile": profile,
+                    "renderer_sha256": renderer_sha,
+                    "rendering_inputs_sha256": inputs_sha,
                     "palette": selected_palette,
                     "embedded_font": str(font) if format_name == "pdf" else None,
                     "meeting_status": "COMPLETE_SOURCE_PRESENTATION_ONLY",

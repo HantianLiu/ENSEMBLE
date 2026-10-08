@@ -6,6 +6,7 @@ import re
 
 
 ENGLISH: dict[str, str] = {
+    "交给 AI 代裁本次科学异议（逐条给出理由，继续修订与复核）": "Let AI decide how to handle this science consultation (reasons, revision and recheck)",
     "状态": "Status",
     "信息": "Info",
     "暂停": "Paused",
@@ -111,7 +112,6 @@ ENGLISH: dict[str, str] = {
     "宽松：这些重要决策只须获全体合格投票者过半赞成；其他规则不变": "Relaxed: those decisions need more than half of all eligible voters; other rules unchanged",
     "是否对独立的代表提交启用最大并行": "Enable maximum parallelism for independent representative submissions?",
     "关闭；使用当前模型配置或保守并发上限": "Off; use configured or conservative concurrency limits",
-    "开启；每个代表模型最多同时调用 4 次，速度更快但缓存未命中可能增加": "On; up to four concurrent calls per model, faster but with more cache misses",
     "如何确定本次要核实的命题": "How to define the claim to verify",
     "直接输入已想好的最终命题": "Enter a final claim directly",
     "与筹备主席对话，逐步整理成最终命题": "Discuss with the preparatory Chair to refine the claim",
@@ -131,11 +131,11 @@ ENGLISH: dict[str, str] = {
     "确认采用并继续初始化": "Accept and continue setup",
     "继续讨论或提出修改意见；主席须重写整份任务": "Continue discussion or request changes; Chair rewrites the entire brief",
     "放弃对话，改为直接输入任务": "Leave dialogue and enter the task directly",
-    "你": "You",
+    "我": "Me",
     "  这一步只设计议事委托，不开始提案、审议或表决。": "  This step designs the brief only; it does not start proposals, review, or voting.",
     "  这一步只设计研究任务，不开始文献检索或撰写报告。": "  This step designs the task only; it does not start literature search or report writing.",
     "  每次可只说一部分想法；/draft 可随时生成当前最佳版本，/back 改为直接输入。": "  Share ideas gradually; /draft shows the best current brief, and /back switches to direct entry.",
-    "  发送后会完整回显你的发言，方便核对长段或多行粘贴。": "  Your complete message is echoed after sending, so you can check long or multi-line input.",
+    "  可直接粘贴多行；若终端逐行提交，先输入 /paste，粘贴后另起一行输入 /end。发送后只显示确认，不重复发言。": "  You can paste multiple lines. If your terminal submits each line, enter /paste first and /end on its own line afterward. Submission is confirmed without repeating your text.",
     "可选：提供人类参考资料": "Optional: add human-provided reference files",
     "文献报告的读者写作设置": "Reader-facing writing settings for the literature review",
     "不启用 Tavily；仅用 OpenAlex": "Do not use Tavily; OpenAlex only",
@@ -180,14 +180,14 @@ ENGLISH: dict[str, str] = {
     "选择科学复核模型（至少两个不同基础模型）": "Choose at least two distinct science-review models",
     "选择科学事实核校模型（至少 2 个）": "Choose at least two science-checking models",
     "选择引文核校模型（至少 2 个）": "Choose at least two citation-checking models",
-    "选择一个或多个编号（逗号分隔）": "Choose one or more numbers (comma-separated)",
+    "选择一个或多个编号（空格/逗号分隔，1-3 表示连续编号）": "Choose numbers (spaces/commas; 1-3 selects a range)",
     "，直接回车选择全部": "; press Enter for all",
     "，直接回车跳过": "; press Enter to skip",
     "，直接回车使用默认值": "; press Enter for default",
     "选择编号: ": "Choose a number: ",
     "请输入列表中的一个编号": "Enter one listed number",
     "（或输入 b 返回）": " (or b to go back)",
-    "请输入不重复的有效编号，例如 1,3。": "Enter distinct valid numbers, for example 1,3.",
+    "请输入不重复的有效编号，例如 1，3-5。": "Enter distinct valid numbers, for example 1,3-5.",
     "中文": "Chinese / 中文",
     "已完成": "Completed",
     "进行中": "In progress",
@@ -233,7 +233,7 @@ ENGLISH: dict[str, str] = {
     "请用自然语言说明要重绘的范围；主席分割后须经你确认": "Describe the rendering scope; you will confirm the Chair's split",
     "建议正文长度（字符数；仅供写作参考，不是硬性限制，最终长度不保证；不含参考文献和独立附录）": "Suggested body length (characters; advisory only, not enforced or guaranteed; excluding references and appendices)",
     "建议正文长度（非空白字符数；仅供写作参考，不是硬性限制，最终长度不保证；不含参考文献和独立附录）": "Suggested body length (non-whitespace characters; advisory only, not enforced or guaranteed; excluding references and appendices)",
-    "按顺序输入全部编号（逗号分隔）": "Enter all numbers in review order (comma-separated)",
+    "按顺序输入全部编号（空格/逗号分隔，1-3 表示连续编号）": "Enter all numbers in review order (spaces/commas; 1-3 selects a range)",
     "每类查询最多返回多少条 [12]": "Maximum results per query type [12]",
     "输入源会议 ID、标题或目录": "Enter a source meeting ID, title, or path",
     "正在从所选供应商实时发现模型……": "Discovering models from the selected providers...",
@@ -393,6 +393,9 @@ def ui_text(text: str, language: str) -> str:
     for source, target in ENGLISH.items():
         if source in {"，直接回车选择全部", "，直接回车跳过", "，直接回车使用默认值"}:
             text = text.replace(source, target)
-    if text.startswith("选择一个或多个编号（逗号分隔）"):
-        text = text.replace("选择一个或多个编号（逗号分隔）", ENGLISH["选择一个或多个编号（逗号分隔）"])
+    if text.startswith("选择一个或多个编号（空格/逗号分隔，1-3 表示连续编号）"):
+        text = text.replace(
+            "选择一个或多个编号（空格/逗号分隔，1-3 表示连续编号）",
+            ENGLISH["选择一个或多个编号（空格/逗号分隔，1-3 表示连续编号）"],
+        )
     return text

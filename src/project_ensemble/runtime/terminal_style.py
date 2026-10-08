@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 from project_ensemble.user_settings import appearance
 from typing import TextIO
 
@@ -16,6 +17,8 @@ YELLOW = "\x1b[33m"
 BLUE = "\x1b[34m"
 MAGENTA = "\x1b[35m"
 CYAN = "\x1b[36m"
+SOFT_BLUE = "\x1b[38;5;110m"
+SOFT_GREEN = "\x1b[38;5;108m"
 
 
 def supports_color(stream: TextIO, override: bool | None = None) -> bool:
@@ -38,6 +41,23 @@ def styled(text: str, *codes: str, enabled: bool) -> str:
     if not enabled or not codes:
         return text
     return "".join(codes) + text + RESET
+
+
+def format_directory_path(path: str | Path, *, compact: bool = True, color: bool = False) -> str:
+    """Show the last three directory levels in lists, with subdued accents."""
+    directory = Path(path).expanduser()
+    parts = list(directory.parts)
+    if directory.anchor:
+        parts = parts[1:]
+    hidden = max(0, len(parts) - 3) if compact else 0
+    prefix = "…" + os.sep if hidden else directory.anchor
+    accents = (SOFT_BLUE, SOFT_GREEN)
+    separator = styled(os.sep, DIM, enabled=color)
+    segments = [
+        styled(part, accents[index % len(accents)], enabled=color)
+        for index, part in enumerate(parts[hidden:], start=hidden)
+    ]
+    return styled(prefix, DIM, enabled=color) + separator.join(segments)
 
 
 def rule_width(stream: TextIO, *, maximum: int = 100) -> int:

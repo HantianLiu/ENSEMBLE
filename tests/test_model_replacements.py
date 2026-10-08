@@ -75,6 +75,23 @@ def test_replacement_requires_a_different_runtime(tmp_path):
         raise AssertionError("same runtime replacement must be rejected")
 
 
+def test_replacement_without_reason_still_records_human_choice(tmp_path):
+    gov = tmp_path / "gov"
+    gov.mkdir()
+    (gov / "rule.md").write_text("rule", encoding="utf-8")
+    repo = MeetingRepository.create(
+        tmp_path / "ws", selected_models=[("fake", "old")],
+        chair_model=("fake", "old"), governance_docs=gov,
+    )
+    record = ModelReplacementService(repo).replace(
+        participant_id="CHAIR", provider_id="fake", model_id="new",
+    )
+    assert record.reason is None
+    assert current_runtime_for(repo, "CHAIR") == ("fake", "new")
+    assert json.loads((repo.root / record.record_path).read_text())["reason"] is None
+    assert repo.events.verify()
+
+
 def test_replacement_can_switch_all_participants_using_one_model(tmp_path):
     gov = tmp_path / "gov"
     gov.mkdir()

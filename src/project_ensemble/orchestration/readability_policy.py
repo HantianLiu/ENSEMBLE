@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from project_ensemble.orchestration.literature_style import READER_PROSE_LEXICON_RULES
+from project_ensemble.orchestration.math_output_prompt import MATH_OUTPUT_FORMAT_RULES
 
 
 PROFICIENCY_ANCHORS = {
@@ -83,6 +84,7 @@ def reader_facing_prose_contract(
     return (
         "\n\n读者正文写作契约（只约束本次获准生成或修改的读者可见文字）："
         + READER_PROSE_LEXICON_RULES
+        + MATH_OUTPUT_FORMAT_RULES
         + "先让读者找到本段的中心判断，再写关键依据、必要解释与真正改变结论的边界；"
         "一个段落原则上只推进一个主要判断。用完整的主谓、介词和连接关系展开压缩名词链，"
         "只显明原有逻辑，不补造机制、事实或因果。"

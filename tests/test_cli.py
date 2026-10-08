@@ -118,7 +118,7 @@ def test_v073_can_resume_v071_meeting_with_same_frozen_governance(tmp_path):
     manifest["software_version"] = "0.7.1"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    # A 0.7.3 executor may continue a 0.7.1 meeting when its immutable
+    # A 0.7.5 executor may continue a 0.7.1 meeting when its immutable
     # governance package is unchanged.
     cli._assert_meeting_runtime_compatible(repo, governance_docs=governance)
 
@@ -129,6 +129,8 @@ def test_v073_can_resume_v071_meeting_with_same_frozen_governance(tmp_path):
 
 
 def test_v071_resume_finds_bundled_exact_governance_snapshot(tmp_path):
+    import shutil
+
     from project_ensemble.paths import bundled_historical_governance_docs
     from project_ensemble.storage.meeting import directory_digest
 
@@ -143,6 +145,8 @@ def test_v071_resume_finds_bundled_exact_governance_snapshot(tmp_path):
         governance_docs=historical,
         task_description="task",
     )
+    # Legacy meetings recorded a digest/path only, not a local package.
+    shutil.rmtree(repo.root / "human_private/governance_snapshot")
     session_path = repo.root / "human_private/session_configuration.json"
     session_path.parent.mkdir(parents=True, exist_ok=True)
     session_path.write_text(
@@ -1006,7 +1010,7 @@ def test_ctrl_r_menu_can_go_back_and_replace_more_than_once(monkeypatch):
                     result.append({"participant_id": participant_id})
             return result
 
-    answers = iter(("1", "1", "2", "y", "1", "测试更换", "y", "2", "2", "2", "y", "1", "再次更换", "n"))
+    answers = iter(("1", "1", "2", "y", "1", "y", "2", "2", "2", "y", "1", "n"))
     monkeypatch.setattr(cli, "terminal_input", lambda _prompt: next(answers))
     monkeypatch.setattr(cli, "meeting_participant_ids", lambda _repo: list(runtime))
     monkeypatch.setattr(cli, "current_runtime_for", lambda _repo, participant: runtime[participant])
@@ -1021,8 +1025,8 @@ def test_ctrl_r_menu_can_go_back_and_replace_more_than_once(monkeypatch):
     })
     cli._interactive_model_replacement(repo=Repo(), cfg=cfg)
     assert replacements == [
-        ("R-ONE", "new", "b", "测试更换"),
-        ("CHAIR", "new", "b", "再次更换"),
+        ("R-ONE", "new", "b", None),
+        ("CHAIR", "new", "b", None),
     ]
 
 
@@ -1046,7 +1050,7 @@ def test_ctrl_r_can_queue_model_concurrency_change_for_safe_batch_boundary(tmp_p
                                     "model_concurrency_limits": {"deepseek:flash": 1}}),
                         encoding="utf-8")
     repo = SimpleNamespace(root=tmp_path)
-    answers = iter(("4", "1", "4", "allow parallel synthesis"))
+    answers = iter(("4", "1", "4"))
     monkeypatch.setattr(cli, "terminal_input", lambda _prompt: next(answers))
     monkeypatch.setattr(cli, "meeting_participant_ids", lambda _repo: ["RESEARCH_DESK"])
     monkeypatch.setattr(cli, "current_runtime_for", lambda _repo, _person: ("deepseek", "flash"))
@@ -1056,9 +1060,28 @@ def test_ctrl_r_can_queue_model_concurrency_change_for_safe_batch_boundary(tmp_p
     changes = cli._interactive_model_replacement(repo=repo, cfg=object(), deferred=True)
     assert changes == [{
         "kind": "runtime_control", "control_kind": "model_concurrency",
-        "target": "deepseek:flash", "value": 4, "reason": "allow parallel synthesis",
+        "target": "deepseek:flash", "value": 4, "reason": None,
     }]
     assert not (tmp_path / "human_private/runtime_controls").exists()
+
+
+def test_ctrl_r_can_change_research_parallelism_without_reason(tmp_path, monkeypatch):
+    manifest = tmp_path / "identity_private/meeting_manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({
+        "research_model": ["deepseek", "flash"],
+        "research_max_concurrent_claim_groups": 8,
+    }), encoding="utf-8")
+    repo = SimpleNamespace(root=tmp_path)
+    answers = iter(("3", "16"))
+    monkeypatch.setattr(cli, "terminal_input", lambda _prompt: next(answers))
+
+    changes = cli._interactive_model_replacement(repo=repo, cfg=object(), deferred=True)
+
+    assert changes == [{
+        "kind": "runtime_control", "control_kind": "research_parallelism",
+        "target": None, "value": 16, "reason": None,
+    }]
 
 
 def test_ctrl_r_can_queue_tavily_quota_policy_for_existing_meeting(tmp_path, monkeypatch):
@@ -1069,7 +1092,7 @@ def test_ctrl_r_can_queue_tavily_quota_policy_for_existing_meeting(tmp_path, mon
     manifest.write_text(json.dumps({"research_model": ["deepseek", "flash"]}), encoding="utf-8")
     repo = SimpleNamespace(root=tmp_path)
     cfg = SimpleNamespace(research=SimpleNamespace(tavily=SimpleNamespace(enabled=True)))
-    answers = iter(("6", "2", "OpenAlex 持续限流，本次会议允许降级检索"))
+    answers = iter(("6", "2"))
     monkeypatch.setattr(cli, "terminal_input", lambda _prompt: next(answers))
 
     changes = cli._interactive_model_replacement(repo=repo, cfg=cfg, deferred=True)
@@ -1077,7 +1100,7 @@ def test_ctrl_r_can_queue_tavily_quota_policy_for_existing_meeting(tmp_path, mon
     assert changes == [{
         "kind": "runtime_control", "control_kind": "openalex_quota_policy",
         "target": None, "value": "tavily",
-        "reason": "OpenAlex 持续限流，本次会议允许降级检索",
+        "reason": None,
     }]
     assert not (tmp_path / "human_private/runtime_controls").exists()
 

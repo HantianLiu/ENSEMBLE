@@ -7,7 +7,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from project_ensemble.ids import MEETING_ID_PREFIXES
 from project_ensemble.user_settings import settings_dir
 
 if os.name == "nt":
@@ -149,7 +148,9 @@ def register_meeting(root: str | Path, config_path: str | Path) -> MeetingIndexE
             lock.write("0")
             lock.flush()
         _lock(lock, True)
-        entries = indexed_meetings(config_path)
+        # Preserve entries whose directories were moved: they are exactly the
+        # records needed to recognize later relocation attempts.
+        entries = _read_entries(_legacy_index_path(config_path)) + _read_entries(index_path)
         by_id = {item.meeting_id: item for item in entries}
         by_id[entry.meeting_id] = entry
         payload = {
@@ -196,6 +197,13 @@ def indexed_meetings(config_path: str | Path) -> list[MeetingIndexEntry]:
     return [entry for entry in by_id.values() if (Path(entry.path) / "public/meeting_manifest.json").is_file()]
 
 
+def registered_meeting(meeting_id: str, config_path: str | Path) -> MeetingIndexEntry | None:
+    """Look up a saved ID even when its old directory no longer exists."""
+
+    entries = _read_entries(_legacy_index_path(config_path)) + _read_entries(meeting_index_path(config_path))
+    return next((entry for entry in reversed(entries) if entry.meeting_id == meeting_id), None)
+
+
 def resolve_indexed_meeting(selector: str, config_path: str | Path) -> Path | None:
     candidate = Path(selector).expanduser()
     direct_candidates = [candidate, Path.cwd() / candidate]
@@ -221,16 +229,12 @@ def discover_local_meetings(directory: str | Path) -> list[Path]:
     if (directory / "public/meeting_manifest.json").is_file():
         found.append(directory)
     if directory.is_dir():
+        # A relocated meeting need not retain its original directory name.
         found.extend(
-            path
-            for path in sorted(
-                path
-                for prefix in MEETING_ID_PREFIXES
-                for path in directory.glob(f"{prefix}-*")
-            )
-            if (path / "public/meeting_manifest.json").is_file()
+            path for path in sorted(directory.iterdir())
+            if path.is_dir() and (path / "public/meeting_manifest.json").is_file()
         )
-    return list(dict.fromkeys(found))
+    return list(dict.fromkeys(path.resolve() for path in found))
 
 
 def _read_entries(path: Path) -> list[MeetingIndexEntry]:

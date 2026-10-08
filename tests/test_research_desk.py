@@ -1031,7 +1031,10 @@ def test_public_source_document_is_archived_in_human_download_bundle(tmp_path):
                 )
             ],
         )
-    with zipfile.ZipFile(repo.root / "public/research/literature_bundle.zip") as bundle:
+    assert not (repo.root / "public/research/literature_bundle.zip").exists()
+    from project_ensemble.research.documents import LiteratureBundleManager
+    bundle_path = LiteratureBundleManager(repo=repo, fetcher=fetcher).rebuild_download_bundle(export_zip=True)
+    with zipfile.ZipFile(repo.root / bundle_path) as bundle:
         assert "manifest.json" in bundle.namelist()
         assert any(name.endswith(".pdf") for name in bundle.namelist())
 
